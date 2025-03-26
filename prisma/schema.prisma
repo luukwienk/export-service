@@ -1,0 +1,251 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Woonplaats {
+  identificatie   String           @id
+  beginGeldigheid DateTime
+  eindGeldigheid  DateTime?
+  geconstateerd   Boolean         @default(false)
+  documentDatum   DateTime
+  documentNummer  String
+  geometry        Json?
+  status         String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  naam           String
+  openbareRuimtes OpenbareRuimte[]
+
+  @@index([eindGeldigheid], map: "idx_woonplaats_eind")
+  @@index([naam], map: "idx_woonplaats_naam")
+}
+
+model OpenbareRuimte {
+  identificatie      String             @id
+  beginGeldigheid    DateTime
+  eindGeldigheid     DateTime?
+  geconstateerd      Boolean            @default(false)
+  documentDatum      DateTime
+  documentNummer     String
+  geometry           Json?
+  status             String
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  naam               String
+  type               String
+  woonplaatsId       String
+  nummeraanduidingen Nummeraanduiding[]
+  woonplaats         Woonplaats         @relation(fields: [woonplaatsId], references: [identificatie])
+
+  @@index([eindGeldigheid], map: "idx_openbare_ruimte_eind")
+  @@index([woonplaatsId], map: "idx_openbare_ruimte_woonplaats")
+  @@index([naam], map: "idx_openbare_ruimte_naam")
+}
+
+model Pand {
+  identificatie          String            @id
+  beginGeldigheid       DateTime
+  eindGeldigheid        DateTime?
+  geconstateerd         Boolean            @default(false)
+  documentDatum         DateTime
+  documentNummer        String
+  geometry              Json?
+  status                String
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  oorspronkelijkBouwjaar Int
+  verblijfsobjecten     Verblijfsobject[]
+
+  @@index([eindGeldigheid], map: "idx_pand_eind")
+}
+
+model Nummeraanduiding {
+  identificatie        String           @id
+  beginGeldigheid      DateTime
+  eindGeldigheid       DateTime?
+  geconstateerd        Boolean          @default(false)
+  documentDatum        DateTime
+  documentNummer       String
+  geometry             Json?
+  status               String
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  huisnummer           Int
+  huisletter           String?
+  huisnummertoevoeging String?
+  postcode             String?
+  type                 String
+  openbareRuimteId     String
+  openbareRuimte       OpenbareRuimte   @relation(fields: [openbareRuimteId], references: [identificatie])
+  verblijfsobject      Verblijfsobject?
+  ligplaats            Ligplaats?
+  standplaats          Standplaats?
+
+  @@index([eindGeldigheid], map: "idx_nummeraanduiding_eind")
+  @@index([openbareRuimteId], map: "idx_nummeraanduiding_openbare_ruimte")
+  @@index([postcode, huisnummer], map: "idx_nummeraanduiding_postcode_huisnummer")
+}
+
+model Verblijfsobject {
+  identificatie      String           @id
+  beginGeldigheid    DateTime
+  eindGeldigheid     DateTime?
+  geconstateerd      Boolean          @default(false)
+  documentDatum      DateTime
+  documentNummer     String
+  geometry           Json?
+  rd_x             Float?   // Was 'longitude'
+  rd_y             Float?   // Was 'latitude'
+  longitude         Float?
+  latitude          Float?
+  status             String
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  gebruiksdoel       String[]
+  oppervlakte        Int
+  nummeraanduidingId String           @unique
+  pandId             String
+  nummeraanduiding   Nummeraanduiding @relation(fields: [nummeraanduidingId], references: [identificatie])
+  pand               Pand             @relation(fields: [pandId], references: [identificatie])
+
+  @@index([longitude, latitude], map: "idx_verblijfsobject_longitude_latitude")
+  @@index([eindGeldigheid], map: "idx_verblijfsobject_eind")
+  @@index([status], map: "idx_verblijfsobject_status")
+  @@index([nummeraanduidingId], map: "idx_verblijfsobject_nummeraanduiding")
+  @@index([pandId], map: "idx_verblijfsobject_pand")
+}
+
+model spatial_ref_sys {
+  srid      Int     @id
+  auth_name String? @db.VarChar(256)
+  auth_srid Int?
+  srtext    String? @db.VarChar(2048)
+  proj4text String? @db.VarChar(2048)
+}
+
+model ImportJob {
+  id          String      @id
+  entityType  String
+  filePath    String
+  status      String      @default("pending")
+  attempts    Int         @default(0)
+  error       String?
+  createdAt   DateTime    @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  @@map("import_jobs")
+}
+
+model NummeraanduidingStaging {
+  id                    Int       @id @default(autoincrement())
+  identificatie         String    @unique // BAG id
+  huisnummer           Int
+  huisletter           String?
+  huisnummertoevoeging String?
+  postcode             String?
+  typeObject           String    // Verblijfsobject, Standplaats, Ligplaats
+  status               String
+  geconstateerd        Boolean
+  documentDatum        DateTime
+  documentNummer       String
+  beginGeldigheid      DateTime
+  tijdstipRegistratie  DateTime
+  openbareRuimteId     String    // Changed from openbareRuimteRef to match main table
+  processingBatch      String?   // For tracking batch processing
+  processed            Boolean   @default(false)
+  error                String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([processingBatch])
+  @@index([processed])
+  @@index([postcode, huisnummer]) // Match the main table indices
+  @@index([openbareRuimteId])    // Match the main table indices
+}
+
+model Ligplaats {
+  identificatie      String           @id
+  beginGeldigheid    DateTime
+  eindGeldigheid     DateTime?
+  geconstateerd      Boolean          @default(false)
+  documentDatum      DateTime
+  documentNummer     String
+  geometry           Json?            // Polygon geometry
+  status             String
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  nummeraanduidingId String           @unique
+  nummeraanduiding   Nummeraanduiding @relation(fields: [nummeraanduidingId], references: [identificatie])
+
+  @@index([eindGeldigheid], map: "idx_ligplaats_eind")
+  @@index([status], map: "idx_ligplaats_status")
+  @@index([nummeraanduidingId], map: "idx_ligplaats_nummeraanduiding")
+}
+
+model Standplaats {
+  identificatie      String           @id
+  beginGeldigheid    DateTime
+  eindGeldigheid     DateTime?
+  geconstateerd      Boolean          @default(false)
+  documentDatum      DateTime
+  documentNummer     String
+  geometry           Json?            // Polygon geometry
+  status             String
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  nummeraanduidingId String           @unique
+  nummeraanduiding   Nummeraanduiding @relation(fields: [nummeraanduidingId], references: [identificatie])
+
+  @@index([eindGeldigheid], map: "idx_standplaats_eind")
+  @@index([status], map: "idx_standplaats_status")
+  @@index([nummeraanduidingId], map: "idx_standplaats_nummeraanduiding")
+}
+
+model StatisticsCache {
+  id          String   @id @default(cuid())
+  type        String
+  filterHash  String
+  data        Json
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([type, filterHash])
+  @@index([expiresAt])
+}
+
+model AddressCache {
+  id          String   @id @default(cuid())
+  queryHash   String   @unique
+  data        Json
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([queryHash])
+  @@index([expiresAt])
+}
+
+model ExportJob {
+  id            String   @id @default(cuid())
+  status        String   // "pending", "processing", "completed", "failed", "cancelled"
+  format        String   // "csv" or "zip"
+  count         Int      // Total number of records to export
+  processedCount Int?    // Current number of processed records
+  percentComplete Int?   // Percentage completion (0-100)
+  filters       Json     // Store filters as JSON
+  blobUrl       String?  // URL to the exported file in Blob storage
+  error         String?  // Error message if job failed
+  createdAt     DateTime @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+  userId        String?  // Optional: link to user who created the export
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("export_jobs")
+}

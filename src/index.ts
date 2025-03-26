@@ -567,7 +567,7 @@ async function processExport(jobId: string): Promise<void> {
             }));
             
             // Convert to CSV and write to stream
-            const csvChunk = stringify(processedAddresses, { header: false });
+            const csvChunk = stringify(processedAddresses, { header: false }).toString();
             const processingTime = Date.now() - processingStart;
             totalProcessingTime += processingTime;
             
@@ -672,6 +672,25 @@ async function processExport(jobId: string): Promise<void> {
     client.release();
   }
 }
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    // Check database connection
+    await prisma.$queryRaw`SELECT 1`;
+    
+    return res.status(200).json({
+      status: 'ok',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Database connection failed'
+    });
+  }
+});
 
 // Start the server
 app.listen(port, () => {
