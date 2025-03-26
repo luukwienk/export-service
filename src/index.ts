@@ -29,7 +29,11 @@ const exportPool = new Pool({
 const prisma = new PrismaClient();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: ['https://nederland-nine.vercel.app/', 'http://localhost:3000'],
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // Authentication middleware
@@ -461,8 +465,8 @@ async function processExport(jobId: string): Promise<void> {
       await writer.write(new TextEncoder().encode(headerRow));
       
       // Process in batches
-      const batchSize = job.filters.batchSize || 50000;
-      const chunkSize = 5000;  // Process in smaller chunks for memory efficiency
+      const batchSize = job.filters.batchSize || 100000;
+      const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
       let lastPostcode = '';
       let lastHuisnummer = 0;
       let hasMoreRecords = true;
