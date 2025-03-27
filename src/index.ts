@@ -520,6 +520,13 @@ interface Address {
   [key: string]: any; // Add index signature
 }
 
+interface AddressCursor {
+  postcode: string;
+  huisnummer: number;
+  huisletter: string | null;
+  huisnummertoevoeging: string | null;
+}
+
 async function processCSVExport(
   job: ExportJob,
   whereClause: string,
@@ -555,10 +562,7 @@ async function processCSVExport(
   // Process in batches
   const batchSize = job.filters.batchSize || 100000;
   const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
-  let lastPostcode = '';
-  let lastHuisnummer = 0;
-  let lastHuisletter = '';
-  let lastHuisnummertoevoeging = '';
+  let currentCursor: AddressCursor | null = null;
   let hasMoreRecords = true;
   let totalProcessed = 0;
   
@@ -603,56 +607,61 @@ async function processCSVExport(
     if (whereClause) {
       query += ` WHERE ${whereClause}`;
       
-      // Add the pagination condition
-      query += ` AND (
-        "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND (
-          "huisnummer" > $${nextParamIndex+2} OR 
-          ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5}::text OR 
-             ("huisletter" = $${nextParamIndex+6}::text AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}::text
-             ))
-            )
-          ))
-        ))
-      )`;
+      // Add the cursor condition if we have a cursor
+      if (currentCursor) {
+        // Cursor condition using row comparison syntax
+        query += ` AND (
+          "postcode",
+          "huisnummer",
+          COALESCE("huisletter", ''),
+          COALESCE("huisnummertoevoeging", '')
+        ) > (
+          $${nextParamIndex},
+          $${nextParamIndex+1},
+          $${nextParamIndex+2},
+          $${nextParamIndex+3}
+        )`;
+        
+        // Add cursor parameters
+        allParams.push(
+          currentCursor.postcode,
+          currentCursor.huisnummer,
+          currentCursor.huisletter || '',
+          currentCursor.huisnummertoevoeging || ''
+        );
+        
+        nextParamIndex += 4;
+      }
     } else {
-      // No filters, just add the pagination condition
-      query += ` WHERE (
-        "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND (
-          "huisnummer" > $${nextParamIndex+2} OR 
-          ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5}::text OR 
-             ("huisletter" = $${nextParamIndex+6}::text AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}::text
-             ))
-            )
-          ))
-        ))
-      )`;
+      // No filters, just add cursor condition if we have a cursor
+      if (currentCursor) {
+        query += ` WHERE (
+          "postcode",
+          "huisnummer",
+          COALESCE("huisletter", ''),
+          COALESCE("huisnummertoevoeging", '')
+        ) > (
+          $${nextParamIndex},
+          $${nextParamIndex+1},
+          $${nextParamIndex+2},
+          $${nextParamIndex+3}
+        )`;
+        
+        allParams.push(
+          currentCursor.postcode,
+          currentCursor.huisnummer,
+          currentCursor.huisletter || '',
+          currentCursor.huisnummertoevoeging || ''
+        );
+        
+        nextParamIndex += 4;
+      }
     }
     
-    // Add pagination parameters with explicit type casting
-    allParams.push(
-      lastPostcode,                         // For postcode > $x
-      lastPostcode,                         // For postcode = $x
-      lastHuisnummer,                       // For huisnummer > $x
-      lastHuisnummer,                       // For huisnummer = $x
-      lastHuisletter || null,               // For huisletter IS NULL
-      lastHuisletter || null,               // For huisletter > $x
-      lastHuisletter || null,               // For huisletter = $x  
-      lastHuisnummertoevoeging || null,     // For huisnummertoevoeging IS NULL
-      lastHuisnummertoevoeging || null      // For huisnummertoevoeging > $x
-    );
-    
     // Add ORDER BY and LIMIT
-    query += ` ORDER BY "postcode", "huisnummer", "huisletter" NULLS LAST, "huisnummertoevoeging" NULLS LAST LIMIT $${nextParamIndex+9}`;
+    query += ` ORDER BY "postcode", "huisnummer", 
+               COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '') 
+               LIMIT $${nextParamIndex}`;
     allParams.push(batchSize);
     
     const addressesResult = await client.query(query, allParams);
@@ -660,17 +669,116 @@ async function processCSVExport(
     
     console.log(`Batch query returned ${addresses.length} addresses`);
     
-    // If we got fewer records than batch size, we've reached the end
-    if (addresses.length < batchSize) {
+    // If we got no records or fewer than batch size, we've reached the end
+    if (addresses.length === 0 || addresses.length < batchSize) {
       hasMoreRecords = false;
+      
+      // Double-check if we really got all records
+      if (totalProcessed < job.count) {
+        const countCheckQuery = `
+          SELECT COUNT(*) as remaining 
+          FROM address_view_materialized
+          ${whereClause ? `WHERE ${whereClause}` : ''}
+        `;
+        
+        const countResult = await client.query(countCheckQuery, params);
+        const actualTotal = parseInt(countResult.rows[0].remaining);
+        
+        // Log the discrepancy if there is one
+        if (actualTotal > totalProcessed) {
+          console.log(`WARNING: Processed ${totalProcessed} records but total should be ${actualTotal}. ` +
+                     `Missing ${actualTotal - totalProcessed} records.`);
+          
+          // Use OFFSET to fetch the remaining records
+          console.log(`Using OFFSET to fetch the remaining ${actualTotal - totalProcessed} records`);
+          
+          const offsetQuery = `
+            SELECT 
+              "postcode",
+              "huisnummer",
+              "huisletter",
+              "huisnummertoevoeging",
+              "straat",
+              "woonplaats",
+              "oppervlakte",
+              "gebruiksdoel",
+              "oorspronkelijkBouwjaar",
+              "latitude",
+              "longitude",
+              "rd_x",
+              "rd_y",
+              "is_ligplaats",
+              "is_standplaats",
+              "is_verblijfsobject",
+              "adres_status" AS "status"
+            FROM address_view_materialized
+            ${whereClause ? `WHERE ${whereClause}` : ''}
+            ORDER BY "postcode", "huisnummer", 
+                     COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
+            OFFSET ${totalProcessed}
+          `;
+          
+          const remainingResult = await client.query(offsetQuery, params);
+          const remainingAddresses = remainingResult.rows;
+          
+          if (remainingAddresses.length > 0) {
+            console.log(`Found ${remainingAddresses.length} remaining records using OFFSET`);
+            
+            // Process the remaining records
+            for (let i = 0; i < remainingAddresses.length; i += chunkSize) {
+              const chunk = remainingAddresses.slice(i, i + chunkSize);
+              
+              // Process the gebruiksdoel array to a comma-separated string
+              const processedAddresses: Address[] = chunk.map((address: Address) => ({
+                ...address,
+                gebruiksdoel: Array.isArray(address.gebruiksdoel) 
+                  ? address.gebruiksdoel.join(', ') 
+                  : address.gebruiksdoel,
+              }));
+              
+              // Convert to CSV rows and add to content
+              for (const address of processedAddresses) {
+                const row = columns.map(col => {
+                  const value = address[col.key];
+                  // Properly escape and quote CSV values
+                  if (value === null || value === undefined) return '';
+                  if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+                    return `"${value.replace(/"/g, '""')}"`;
+                  }
+                  return value;
+                }).join(',');
+                csvContent += row + '\n';
+              }
+              
+              // Update counters
+              totalProcessed += chunk.length;
+              
+              // Update progress
+              const percentComplete = Math.round((totalProcessed / job.count) * 100);
+              await client.query(
+                `UPDATE export_jobs 
+                 SET "processedCount" = $1, 
+                     "percentComplete" = $2 
+                 WHERE id = $3 AND "percentComplete" < $2`,
+                [totalProcessed, percentComplete, job.id]
+              );
+              
+              console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+            }
+          }
+        }
+      }
     }
     
     if (addresses.length > 0) {
-      // Update pagination cursor
-      lastPostcode = addresses[addresses.length - 1].postcode;
-      lastHuisnummer = addresses[addresses.length - 1].huisnummer;
-      lastHuisletter = addresses[addresses.length - 1].huisletter || null;
-      lastHuisnummertoevoeging = addresses[addresses.length - 1].huisnummertoevoeging || null;
+      // Update cursor with values from the last record
+      const lastRecord = addresses[addresses.length - 1];
+      currentCursor = {
+        postcode: lastRecord.postcode,
+        huisnummer: lastRecord.huisnummer,
+        huisletter: lastRecord.huisletter,
+        huisnummertoevoeging: lastRecord.huisnummertoevoeging
+      };
       
       // Process in smaller chunks to avoid memory issues
       for (let i = 0; i < addresses.length; i += chunkSize) {
@@ -792,10 +900,7 @@ async function processZIPExport(
   // Process in batches
   const batchSize = job.filters.batchSize || 100000;
   const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
-  let lastPostcode = '';
-  let lastHuisnummer = 0;
-  let lastHuisletter = '';
-  let lastHuisnummertoevoeging = '';
+  let currentCursor: AddressCursor | null = null;
   let hasMoreRecords = true;
   let totalProcessed = 0;
   
@@ -840,72 +945,176 @@ async function processZIPExport(
     if (whereClause) {
       query += ` WHERE ${whereClause}`;
       
-      // Add the pagination condition
-      query += ` AND (
-        "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND (
-          "huisnummer" > $${nextParamIndex+2} OR 
-          ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5}::text OR 
-             ("huisletter" = $${nextParamIndex+6}::text AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}::text
-             ))
-            )
-          ))
-        ))
-      )`;
+      // Add the cursor condition if we have a cursor
+      if (currentCursor) {
+        // Cursor condition using row comparison syntax
+        query += ` AND (
+          "postcode",
+          "huisnummer",
+          COALESCE("huisletter", ''),
+          COALESCE("huisnummertoevoeging", '')
+        ) > (
+          $${nextParamIndex},
+          $${nextParamIndex+1},
+          $${nextParamIndex+2},
+          $${nextParamIndex+3}
+        )`;
+        
+        // Add cursor parameters
+        allParams.push(
+          currentCursor.postcode,
+          currentCursor.huisnummer,
+          currentCursor.huisletter || '',
+          currentCursor.huisnummertoevoeging || ''
+        );
+        
+        nextParamIndex += 4;
+      }
     } else {
-      // No filters, just add the pagination condition
-      query += ` WHERE (
-        "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND (
-          "huisnummer" > $${nextParamIndex+2} OR 
-          ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5}::text OR 
-             ("huisletter" = $${nextParamIndex+6}::text AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}::text
-             ))
-            )
-          ))
-        ))
-      )`;
+      // No filters, just add cursor condition if we have a cursor
+      if (currentCursor) {
+        query += ` WHERE (
+          "postcode",
+          "huisnummer",
+          COALESCE("huisletter", ''),
+          COALESCE("huisnummertoevoeging", '')
+        ) > (
+          $${nextParamIndex},
+          $${nextParamIndex+1},
+          $${nextParamIndex+2},
+          $${nextParamIndex+3}
+        )`;
+        
+        allParams.push(
+          currentCursor.postcode,
+          currentCursor.huisnummer,
+          currentCursor.huisletter || '',
+          currentCursor.huisnummertoevoeging || ''
+        );
+        
+        nextParamIndex += 4;
+      }
     }
     
-    // Add pagination parameters with explicit type casting
-    allParams.push(
-      lastPostcode,                         // For postcode > $x
-      lastPostcode,                         // For postcode = $x
-      lastHuisnummer,                       // For huisnummer > $x
-      lastHuisnummer,                       // For huisnummer = $x
-      lastHuisletter || null,               // For huisletter IS NULL
-      lastHuisletter || null,               // For huisletter > $x
-      lastHuisletter || null,               // For huisletter = $x  
-      lastHuisnummertoevoeging || null,     // For huisnummertoevoeging IS NULL
-      lastHuisnummertoevoeging || null      // For huisnummertoevoeging > $x
-    );
-    
     // Add ORDER BY and LIMIT
-    query += ` ORDER BY "postcode", "huisnummer", "huisletter" NULLS LAST, "huisnummertoevoeging" NULLS LAST LIMIT $${nextParamIndex+9}`;
+    query += ` ORDER BY "postcode", "huisnummer", 
+               COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '') 
+               LIMIT $${nextParamIndex}`;
     allParams.push(batchSize);
     
     const addressesResult = await client.query(query, allParams);
     const addresses = addressesResult.rows;
     
-    // If we got fewer records than batch size, we've reached the end
-    if (addresses.length < batchSize) {
+    // If we got no records or fewer than batch size, we've reached the end
+    if (addresses.length === 0 || addresses.length < batchSize) {
       hasMoreRecords = false;
+      
+      // Double-check if we really got all records
+      if (totalProcessed < job.count) {
+        const countCheckQuery = `
+          SELECT COUNT(*) as remaining 
+          FROM address_view_materialized
+          ${whereClause ? `WHERE ${whereClause}` : ''}
+        `;
+        
+        const countResult = await client.query(countCheckQuery, params);
+        const actualTotal = parseInt(countResult.rows[0].remaining);
+        
+        // Log the discrepancy if there is one
+        if (actualTotal > totalProcessed) {
+          console.log(`WARNING: Processed ${totalProcessed} records but total should be ${actualTotal}. ` +
+                     `Missing ${actualTotal - totalProcessed} records.`);
+          
+          // Use OFFSET to fetch the remaining records
+          console.log(`Using OFFSET to fetch the remaining ${actualTotal - totalProcessed} records`);
+          
+          const offsetQuery = `
+            SELECT 
+              "postcode",
+              "huisnummer",
+              "huisletter",
+              "huisnummertoevoeging",
+              "straat",
+              "woonplaats",
+              "oppervlakte",
+              "gebruiksdoel",
+              "oorspronkelijkBouwjaar",
+              "latitude",
+              "longitude",
+              "rd_x",
+              "rd_y",
+              "is_ligplaats",
+              "is_standplaats",
+              "is_verblijfsobject",
+              "adres_status" AS "status"
+            FROM address_view_materialized
+            ${whereClause ? `WHERE ${whereClause}` : ''}
+            ORDER BY "postcode", "huisnummer", 
+                     COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
+            OFFSET ${totalProcessed}
+          `;
+          
+          const remainingResult = await client.query(offsetQuery, params);
+          const remainingAddresses = remainingResult.rows;
+          
+          if (remainingAddresses.length > 0) {
+            console.log(`Found ${remainingAddresses.length} remaining records using OFFSET`);
+            
+            // Process the remaining records
+            for (let i = 0; i < remainingAddresses.length; i += chunkSize) {
+              const chunk = remainingAddresses.slice(i, i + chunkSize);
+              
+              // Process the gebruiksdoel array to a comma-separated string
+              const processedAddresses: Address[] = chunk.map((address: Address) => ({
+                ...address,
+                gebruiksdoel: Array.isArray(address.gebruiksdoel) 
+                  ? address.gebruiksdoel.join(', ') 
+                  : address.gebruiksdoel,
+              }));
+              
+              // Convert to CSV rows and add to content
+              for (const address of processedAddresses) {
+                const row = columns.map(col => {
+                  const value = address[col.key];
+                  // Properly escape and quote CSV values
+                  if (value === null || value === undefined) return '';
+                  if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+                    return `"${value.replace(/"/g, '""')}"`;
+                  }
+                  return value;
+                }).join(',');
+                csvContent += row + '\n';
+              }
+              
+              // Update counters
+              totalProcessed += chunk.length;
+              
+              // Update progress
+              const percentComplete = Math.round((totalProcessed / job.count) * 100);
+              await client.query(
+                `UPDATE export_jobs 
+                 SET "processedCount" = $1, 
+                     "percentComplete" = $2 
+                 WHERE id = $3 AND "percentComplete" < $2`,
+                [totalProcessed, percentComplete, job.id]
+              );
+              
+              console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+            }
+          }
+        }
+      }
     }
     
     if (addresses.length > 0) {
-      // Update pagination cursor
-      lastPostcode = addresses[addresses.length - 1].postcode;
-      lastHuisnummer = addresses[addresses.length - 1].huisnummer;
-      lastHuisletter = addresses[addresses.length - 1].huisletter || null;
-      lastHuisnummertoevoeging = addresses[addresses.length - 1].huisnummertoevoeging || null;
+      // Update cursor with values from the last record
+      const lastRecord = addresses[addresses.length - 1];
+      currentCursor = {
+        postcode: lastRecord.postcode,
+        huisnummer: lastRecord.huisnummer,
+        huisletter: lastRecord.huisletter,
+        huisnummertoevoeging: lastRecord.huisnummertoevoeging
+      };
       
       // Process in smaller chunks to avoid memory issues
       for (let i = 0; i < addresses.length; i += chunkSize) {
