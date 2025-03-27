@@ -560,8 +560,8 @@ async function processCSVExport(
   let csvContent = columns.map(col => col.header).join(',') + '\n';
   
   // Process in batches with OFFSET pagination
-  const batchSize = job.filters.batchSize || 100000;
-  const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
+  const batchSize = job.filters.batchSize || 200000;
+  const chunkSize = 20000;  // Process in smaller chunks for memory efficiency
   let offset = 0;
   let hasMoreRecords = true;
   let totalProcessed = 0;
