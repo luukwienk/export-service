@@ -249,7 +249,7 @@ app.post('/api/addresses/export', authenticate, async (req, res) => {
       console.log(`Found ${count} records to export`);
       
       // Check for rate limiting
-      const MAX_RECORDS = 10000000; // 10 million records
+      const MAX_RECORDS = 1000000; // 10 million records
       if (count > MAX_RECORDS) {
         return res.status(400).json({
           error: `Too many addresses found (${count.toLocaleString('nl-NL')}). Maximum is ${MAX_RECORDS.toLocaleString('nl-NL')} addresses. Use filters to reduce the number of results.`
