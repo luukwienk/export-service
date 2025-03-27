@@ -97,10 +97,11 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
   }
 
   if (filters.postcode) {
-    const cleanPostcode = filters.postcode.trim().toUpperCase();
+    // Use exact matching with cleaned postcode - consistent with frontend
+    const cleanPostcode = filters.postcode.replace(/\s+/g, '').toUpperCase();
     if (cleanPostcode) {
-      conditions.push(`postcode ILIKE $${paramIndex}`);
-      params.push(cleanPostcode + '%');
+      conditions.push(`postcode = $${paramIndex}`);
+      params.push(cleanPostcode);
       paramIndex++;
     }
   }
@@ -112,14 +113,16 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
   }
   
   if (filters.straat) {
-    conditions.push(`straat ILIKE $${paramIndex}`);
-    params.push(`%${filters.straat}%`);
+    // Changed from ILIKE to exact matching (=) to match frontend behavior
+    conditions.push(`straat = $${paramIndex}`);
+    params.push(filters.straat);
     paramIndex++;
   }
 
   if (filters.woonplaats) {
-    conditions.push(`woonplaats ILIKE $${paramIndex}`);
-    params.push(`%${filters.woonplaats}%`);
+    // Changed from ILIKE to exact matching (=) to match frontend behavior
+    conditions.push(`woonplaats = $${paramIndex}`);
+    params.push(filters.woonplaats);
     paramIndex++;
   }
 
