@@ -77,7 +77,7 @@ const ExportQuerySchema = z.object({
   einddatum: z.string().optional(),
   object_id: z.string().optional(),
   format: z.enum(['csv', 'zip']).default('csv'),
-  batchSize: z.coerce.number().int().min(1000).max(200000).default(20000),
+  batchSize: z.coerce.number().int().min(1000).max(200000).default(200000),
 });
 
 // Helper to build SQL WHERE clause
