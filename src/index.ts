@@ -609,11 +609,11 @@ async function processCSVExport(
         ("postcode" = $${nextParamIndex+1} AND (
           "huisnummer" > $${nextParamIndex+2} OR 
           ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5} OR 
-             ("huisletter" = $${nextParamIndex+6} AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}
+            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5}::text OR 
+             ("huisletter" = $${nextParamIndex+6}::text AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}::text
              ))
             )
           ))
@@ -626,11 +626,11 @@ async function processCSVExport(
         ("postcode" = $${nextParamIndex+1} AND (
           "huisnummer" > $${nextParamIndex+2} OR 
           ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5} OR 
-             ("huisletter" = $${nextParamIndex+6} AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}
+            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5}::text OR 
+             ("huisletter" = $${nextParamIndex+6}::text AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}::text
              ))
             )
           ))
@@ -638,17 +638,17 @@ async function processCSVExport(
       )`;
     }
     
-    // Add pagination parameters
+    // Add pagination parameters with explicit type casting
     allParams.push(
-      lastPostcode, 
-      lastPostcode, 
-      lastHuisnummer,
-      lastHuisnummer,
-      lastHuisletter,
-      lastHuisletter,
-      lastHuisletter,
-      lastHuisnummertoevoeging,
-      lastHuisnummertoevoeging
+      lastPostcode,                         // For postcode > $x
+      lastPostcode,                         // For postcode = $x
+      lastHuisnummer,                       // For huisnummer > $x
+      lastHuisnummer,                       // For huisnummer = $x
+      lastHuisletter || null,               // For huisletter IS NULL
+      lastHuisletter || null,               // For huisletter > $x
+      lastHuisletter || null,               // For huisletter = $x  
+      lastHuisnummertoevoeging || null,     // For huisnummertoevoeging IS NULL
+      lastHuisnummertoevoeging || null      // For huisnummertoevoeging > $x
     );
     
     // Add ORDER BY and LIMIT
@@ -846,11 +846,11 @@ async function processZIPExport(
         ("postcode" = $${nextParamIndex+1} AND (
           "huisnummer" > $${nextParamIndex+2} OR 
           ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5} OR 
-             ("huisletter" = $${nextParamIndex+6} AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}
+            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5}::text OR 
+             ("huisletter" = $${nextParamIndex+6}::text AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}::text
              ))
             )
           ))
@@ -863,11 +863,11 @@ async function processZIPExport(
         ("postcode" = $${nextParamIndex+1} AND (
           "huisnummer" > $${nextParamIndex+2} OR 
           ("huisnummer" = $${nextParamIndex+3} AND (
-            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
-            ("huisletter" > $${nextParamIndex+5} OR 
-             ("huisletter" = $${nextParamIndex+6} AND (
-               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
-               "huisnummertoevoeging" > $${nextParamIndex+8}
+            ("huisletter" IS NULL AND $${nextParamIndex+4}::text IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5}::text OR 
+             ("huisletter" = $${nextParamIndex+6}::text AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7}::text IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}::text
              ))
             )
           ))
@@ -875,17 +875,17 @@ async function processZIPExport(
       )`;
     }
     
-    // Add pagination parameters
+    // Add pagination parameters with explicit type casting
     allParams.push(
-      lastPostcode, 
-      lastPostcode, 
-      lastHuisnummer,
-      lastHuisnummer,
-      lastHuisletter,
-      lastHuisletter,
-      lastHuisletter,
-      lastHuisnummertoevoeging,
-      lastHuisnummertoevoeging
+      lastPostcode,                         // For postcode > $x
+      lastPostcode,                         // For postcode = $x
+      lastHuisnummer,                       // For huisnummer > $x
+      lastHuisnummer,                       // For huisnummer = $x
+      lastHuisletter || null,               // For huisletter IS NULL
+      lastHuisletter || null,               // For huisletter > $x
+      lastHuisletter || null,               // For huisletter = $x  
+      lastHuisnummertoevoeging || null,     // For huisnummertoevoeging IS NULL
+      lastHuisnummertoevoeging || null      // For huisnummertoevoeging > $x
     );
     
     // Add ORDER BY and LIMIT
