@@ -557,6 +557,8 @@ async function processCSVExport(
   const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
   let lastPostcode = '';
   let lastHuisnummer = 0;
+  let lastHuisletter = '';
+  let lastHuisnummertoevoeging = '';
   let hasMoreRecords = true;
   let totalProcessed = 0;
   
@@ -604,21 +606,53 @@ async function processCSVExport(
       // Add the pagination condition
       query += ` AND (
         "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND "huisnummer" > $${nextParamIndex+2})
+        ("postcode" = $${nextParamIndex+1} AND (
+          "huisnummer" > $${nextParamIndex+2} OR 
+          ("huisnummer" = $${nextParamIndex+3} AND (
+            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5} OR 
+             ("huisletter" = $${nextParamIndex+6} AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}
+             ))
+            )
+          ))
+        ))
       )`;
     } else {
       // No filters, just add the pagination condition
       query += ` WHERE (
         "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND "huisnummer" > $${nextParamIndex+2})
+        ("postcode" = $${nextParamIndex+1} AND (
+          "huisnummer" > $${nextParamIndex+2} OR 
+          ("huisnummer" = $${nextParamIndex+3} AND (
+            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5} OR 
+             ("huisletter" = $${nextParamIndex+6} AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}
+             ))
+            )
+          ))
+        ))
       )`;
     }
     
     // Add pagination parameters
-    allParams.push(lastPostcode, lastPostcode, lastHuisnummer);
+    allParams.push(
+      lastPostcode, 
+      lastPostcode, 
+      lastHuisnummer,
+      lastHuisnummer,
+      lastHuisletter,
+      lastHuisletter,
+      lastHuisletter,
+      lastHuisnummertoevoeging,
+      lastHuisnummertoevoeging
+    );
     
     // Add ORDER BY and LIMIT
-    query += ` ORDER BY "postcode", "huisnummer" LIMIT $${nextParamIndex+3}`;
+    query += ` ORDER BY "postcode", "huisnummer", "huisletter" NULLS LAST, "huisnummertoevoeging" NULLS LAST LIMIT $${nextParamIndex+9}`;
     allParams.push(batchSize);
     
     const addressesResult = await client.query(query, allParams);
@@ -635,6 +669,8 @@ async function processCSVExport(
       // Update pagination cursor
       lastPostcode = addresses[addresses.length - 1].postcode;
       lastHuisnummer = addresses[addresses.length - 1].huisnummer;
+      lastHuisletter = addresses[addresses.length - 1].huisletter || null;
+      lastHuisnummertoevoeging = addresses[addresses.length - 1].huisnummertoevoeging || null;
       
       // Process in smaller chunks to avoid memory issues
       for (let i = 0; i < addresses.length; i += chunkSize) {
@@ -758,6 +794,8 @@ async function processZIPExport(
   const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
   let lastPostcode = '';
   let lastHuisnummer = 0;
+  let lastHuisletter = '';
+  let lastHuisnummertoevoeging = '';
   let hasMoreRecords = true;
   let totalProcessed = 0;
   
@@ -805,21 +843,53 @@ async function processZIPExport(
       // Add the pagination condition
       query += ` AND (
         "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND "huisnummer" > $${nextParamIndex+2})
+        ("postcode" = $${nextParamIndex+1} AND (
+          "huisnummer" > $${nextParamIndex+2} OR 
+          ("huisnummer" = $${nextParamIndex+3} AND (
+            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5} OR 
+             ("huisletter" = $${nextParamIndex+6} AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}
+             ))
+            )
+          ))
+        ))
       )`;
     } else {
       // No filters, just add the pagination condition
       query += ` WHERE (
         "postcode" > $${nextParamIndex} OR 
-        ("postcode" = $${nextParamIndex+1} AND "huisnummer" > $${nextParamIndex+2})
+        ("postcode" = $${nextParamIndex+1} AND (
+          "huisnummer" > $${nextParamIndex+2} OR 
+          ("huisnummer" = $${nextParamIndex+3} AND (
+            ("huisletter" IS NULL AND $${nextParamIndex+4} IS NOT NULL) OR
+            ("huisletter" > $${nextParamIndex+5} OR 
+             ("huisletter" = $${nextParamIndex+6} AND (
+               ("huisnummertoevoeging" IS NULL AND $${nextParamIndex+7} IS NOT NULL) OR
+               "huisnummertoevoeging" > $${nextParamIndex+8}
+             ))
+            )
+          ))
+        ))
       )`;
     }
     
     // Add pagination parameters
-    allParams.push(lastPostcode, lastPostcode, lastHuisnummer);
+    allParams.push(
+      lastPostcode, 
+      lastPostcode, 
+      lastHuisnummer,
+      lastHuisnummer,
+      lastHuisletter,
+      lastHuisletter,
+      lastHuisletter,
+      lastHuisnummertoevoeging,
+      lastHuisnummertoevoeging
+    );
     
     // Add ORDER BY and LIMIT
-    query += ` ORDER BY "postcode", "huisnummer" LIMIT $${nextParamIndex+3}`;
+    query += ` ORDER BY "postcode", "huisnummer", "huisletter" NULLS LAST, "huisnummertoevoeging" NULLS LAST LIMIT $${nextParamIndex+9}`;
     allParams.push(batchSize);
     
     const addressesResult = await client.query(query, allParams);
@@ -834,6 +904,8 @@ async function processZIPExport(
       // Update pagination cursor
       lastPostcode = addresses[addresses.length - 1].postcode;
       lastHuisnummer = addresses[addresses.length - 1].huisnummer;
+      lastHuisletter = addresses[addresses.length - 1].huisletter || null;
+      lastHuisnummertoevoeging = addresses[addresses.length - 1].huisnummertoevoeging || null;
       
       // Process in smaller chunks to avoid memory issues
       for (let i = 0; i < addresses.length; i += chunkSize) {
