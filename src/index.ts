@@ -30,7 +30,7 @@ const prisma = new PrismaClient();
 
 // Middleware
 app.use(cors({
-  origin: ['https://nederland-nine.vercel.app/', 'http://localhost:3000'],
+  origin: ['https://nederland-nine.vercel.app', 'http://localhost:3000'],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
