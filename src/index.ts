@@ -504,6 +504,7 @@ interface Address {
   huisnummer: number;
   huisletter?: string;
   huisnummertoevoeging?: string;
+  huisnummer_toevoeging_gecombineerd?: string | null;
   straat: string;
   woonplaats: string;
   oppervlakte?: number;
@@ -541,6 +542,7 @@ async function processCSVExport(
     { key: 'huisnummer', header: 'Huisnummer' },
     { key: 'huisletter', header: 'Huisletter' },
     { key: 'huisnummertoevoeging', header: 'Toevoeging' },
+    { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummer Toevoeging Gecombineerd' },
     { key: 'straat', header: 'Straat' },
     { key: 'woonplaats', header: 'Woonplaats' },
     { key: 'oppervlakte', header: 'Oppervlakte' },
@@ -619,13 +621,30 @@ async function processCSVExport(
       for (let i = 0; i < addresses.length; i += chunkSize) {
         const chunk = addresses.slice(i, i + chunkSize);
         
-        // Process the gebruiksdoel array to a comma-separated string
-        const processedAddresses: Address[] = chunk.map((address: Address) => ({
-          ...address,
-          gebruiksdoel: Array.isArray(address.gebruiksdoel) 
-            ? address.gebruiksdoel.join(', ') 
-            : address.gebruiksdoel,
-        }));
+        // Process the gebruiksdoel array to a comma-separated string and add combined field
+        const processedAddresses: Address[] = chunk.map((address: Address) => {
+          // Combine huisletter and huisnummertoevoeging
+          let huisnummer_toevoeging_gecombineerd = null;
+          if (address.huisletter || address.huisnummertoevoeging) {
+            const letter = address.huisletter?.trim() || '';
+            const addition = address.huisnummertoevoeging?.trim() || '';
+            if (letter && addition) {
+              huisnummer_toevoeging_gecombineerd = `${letter}-${addition}`;
+            } else if (letter) {
+              huisnummer_toevoeging_gecombineerd = letter;
+            } else if (addition) {
+              huisnummer_toevoeging_gecombineerd = addition;
+            }
+          }
+          
+          return {
+            ...address,
+            gebruiksdoel: Array.isArray(address.gebruiksdoel) 
+              ? address.gebruiksdoel.join(', ') 
+              : address.gebruiksdoel,
+            huisnummer_toevoeging_gecombineerd
+          };
+        });
         
         // Convert to CSV rows and add to content
         for (const address of processedAddresses) {
@@ -668,9 +687,11 @@ async function processCSVExport(
   
   console.log(`CSV generation complete. Total size: ${csvContent.length} bytes`);
   
-  // Convert content to readable stream
-  const buffer = Buffer.from(csvContent, 'utf-8');
-  const readableStream = Readable.from(buffer);
+  // Convert content to readable stream with UTF-8 BOM for proper Excel encoding
+  const BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
+  const contentBuffer = Buffer.from(csvContent, 'utf-8');
+  const bufferWithBOM = Buffer.concat([BOM, contentBuffer]);
+  const readableStream = Readable.from(bufferWithBOM);
   
   // Upload to Vercel Blob Storage
   try {
@@ -717,6 +738,7 @@ async function processZIPExport(
     { key: 'huisnummer', header: 'Huisnummer' },
     { key: 'huisletter', header: 'Huisletter' },
     { key: 'huisnummertoevoeging', header: 'Toevoeging' },
+    { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummer Toevoeging Gecombineerd' },
     { key: 'straat', header: 'Straat' },
     { key: 'woonplaats', header: 'Woonplaats' },
     { key: 'oppervlakte', header: 'Oppervlakte' },
@@ -793,13 +815,30 @@ async function processZIPExport(
       for (let i = 0; i < addresses.length; i += chunkSize) {
         const chunk = addresses.slice(i, i + chunkSize);
         
-        // Process the gebruiksdoel array to a comma-separated string
-        const processedAddresses: Address[] = chunk.map((address: Address) => ({
-          ...address,
-          gebruiksdoel: Array.isArray(address.gebruiksdoel) 
-            ? address.gebruiksdoel.join(', ') 
-            : address.gebruiksdoel,
-        }));
+        // Process the gebruiksdoel array to a comma-separated string and add combined field
+        const processedAddresses: Address[] = chunk.map((address: Address) => {
+          // Combine huisletter and huisnummertoevoeging
+          let huisnummer_toevoeging_gecombineerd = null;
+          if (address.huisletter || address.huisnummertoevoeging) {
+            const letter = address.huisletter?.trim() || '';
+            const addition = address.huisnummertoevoeging?.trim() || '';
+            if (letter && addition) {
+              huisnummer_toevoeging_gecombineerd = `${letter}-${addition}`;
+            } else if (letter) {
+              huisnummer_toevoeging_gecombineerd = letter;
+            } else if (addition) {
+              huisnummer_toevoeging_gecombineerd = addition;
+            }
+          }
+          
+          return {
+            ...address,
+            gebruiksdoel: Array.isArray(address.gebruiksdoel) 
+              ? address.gebruiksdoel.join(', ') 
+              : address.gebruiksdoel,
+            huisnummer_toevoeging_gecombineerd
+          };
+        });
         
         // Convert to CSV rows and add to content
         for (const address of processedAddresses) {
