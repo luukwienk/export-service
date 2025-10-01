@@ -211,7 +211,7 @@ app.post('/api/addresses/export', authenticate, async (req, res) => {
         // Count records to be exported
         const client = await exportPool.connect();
         try {
-            let countQuery = 'SELECT COUNT(*) as count FROM address_view_materialized';
+            let countQuery = 'SELECT COUNT(*) as count FROM address_export';
             if (whereClause) {
                 countQuery += ` WHERE ${whereClause}`;
             }
@@ -477,7 +477,7 @@ async function processCSVExport(job, whereClause, params, nextParamIndex, client
         "is_standplaats",
         "is_verblijfsobject",
         "adres_status" AS "status"
-      FROM address_view_materialized
+      FROM address_export
       ${whereClause ? `WHERE ${whereClause}` : ''}
       ORDER BY "postcode", "huisnummer", 
                COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
@@ -636,7 +636,7 @@ async function processZIPExport(job, whereClause, params, nextParamIndex, client
         "is_standplaats",
         "is_verblijfsobject",
         "adres_status" AS "status"
-      FROM address_view_materialized
+      FROM address_export
       ${whereClause ? `WHERE ${whereClause}` : ''}
       ORDER BY "postcode", "huisnummer", 
                COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
