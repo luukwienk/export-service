@@ -24,11 +24,20 @@ const exportPool = new Pool({
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 30000,
+  ssl: {
+    rejectUnauthorized: false  // Accept self-signed certificates from DigitalOcean
+  }
 });
 
 // Initialize Prisma client - we'll use this for metadata operations
 // but use raw connections for the actual export processing
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: process.env.DATABASE_URL
+    }
+  }
+});
 
 // Middleware
 app.use(cors({
