@@ -13,6 +13,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - API_KEY=${API_KEY}
       - BLOB_READ_WRITE_TOKEN=${BLOB_READ_WRITE_TOKEN}
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
       - PORT=3001
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
