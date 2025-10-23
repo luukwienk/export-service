@@ -562,7 +562,7 @@ async function processCSVExport(
     { key: 'postcode', header: 'Postcode' },
     { key: 'huisnummer', header: 'Huisnummer' },
     { key: 'huisletter', header: 'Huisletter' },
-    { key: 'huisnummertoevoeging', header: 'Toevoeging' },
+    { key: 'huisnummertoevoeging', header: 'Nummer Toevoeging' },
     // Include a separate combined column (letter+toevoeging)
     { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummertoevoeging' },
     { key: 'straat', header: 'Straat' },
@@ -764,7 +764,7 @@ async function processZIPExport(
     { key: 'postcode', header: 'Postcode' },
     { key: 'huisnummer', header: 'Huisnummer' },
     { key: 'huisletter', header: 'Huisletter' },
-    { key: 'huisnummertoevoeging', header: 'Toevoeging' },
+    { key: 'huisnummertoevoeging', header: 'Nummer Toevoeging' },
     { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummertoevoeging' },
     { key: 'straat', header: 'Straat' },
     { key: 'woonplaats', header: 'Woonplaats' },
