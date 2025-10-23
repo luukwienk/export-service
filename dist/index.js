@@ -25,10 +25,19 @@ const exportPool = new pg_1.Pool({
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 30000,
+    ssl: {
+        rejectUnauthorized: false // Accept self-signed certificates from DigitalOcean
+    }
 });
 // Initialize Prisma client - we'll use this for metadata operations
 // but use raw connections for the actual export processing
-const prisma = new client_1.PrismaClient();
+const prisma = new client_1.PrismaClient({
+    datasources: {
+        db: {
+            url: process.env.DATABASE_URL
+        }
+    }
+});
 // Middleware
 app.use((0, cors_1.default)({
     origin: [
@@ -79,13 +88,19 @@ function buildWhereClause(filters) {
     const conditions = [];
     const params = [];
     let paramIndex = 1;
-    if (filters.search) {
+    // Sanitize incoming string filters to avoid whitespace-related mismatches
+    const search = typeof filters.search === 'string' ? filters.search.trim() : undefined;
+    const straat = typeof filters.straat === 'string' ? filters.straat.trim() : undefined;
+    const woonplaats = typeof filters.woonplaats === 'string' ? filters.woonplaats.trim() : undefined;
+    const adres_status = typeof filters.adres_status === 'string' ? filters.adres_status.trim() : undefined;
+    const gebruiksdoel = typeof filters.gebruiksdoel === 'string' ? filters.gebruiksdoel.trim() : undefined;
+    if (search) {
         conditions.push(`(
       straat ILIKE $${paramIndex} OR
       woonplaats ILIKE $${paramIndex + 1} OR
       postcode ILIKE $${paramIndex + 2}
     )`);
-        params.push(`%${filters.search}%`, `%${filters.search}%`, `%${filters.search}%`);
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
         paramIndex += 3;
     }
     if (filters.postcode) {
@@ -97,21 +112,26 @@ function buildWhereClause(filters) {
             paramIndex++;
         }
     }
-    if (filters.postcodeRange?.from && filters.postcodeRange?.to) {
+    // Normalize postcode range values (strip spaces, uppercase) and only apply when both are set
+    const rangeFromRaw = filters.postcodeRange?.from;
+    const rangeToRaw = filters.postcodeRange?.to;
+    const rangeFrom = typeof rangeFromRaw === 'string' ? rangeFromRaw.replace(/\s+/g, '').toUpperCase() : undefined;
+    const rangeTo = typeof rangeToRaw === 'string' ? rangeToRaw.replace(/\s+/g, '').toUpperCase() : undefined;
+    if (rangeFrom && rangeTo) {
         conditions.push(`postcode >= $${paramIndex} AND postcode <= $${paramIndex + 1}`);
-        params.push(filters.postcodeRange.from, filters.postcodeRange.to);
+        params.push(rangeFrom, rangeTo);
         paramIndex += 2;
     }
-    if (filters.straat) {
-        // Changed from ILIKE to exact matching (=) to match frontend behavior
+    if (straat) {
+        // Exact matching to align with frontend behavior
         conditions.push(`straat = $${paramIndex}`);
-        params.push(filters.straat);
+        params.push(straat);
         paramIndex++;
     }
-    if (filters.woonplaats) {
-        // Changed from ILIKE to exact matching (=) to match frontend behavior
+    if (woonplaats) {
+        // Exact matching to align with frontend behavior
         conditions.push(`woonplaats = $${paramIndex}`);
-        params.push(filters.woonplaats);
+        params.push(woonplaats);
         paramIndex++;
     }
     if (filters.huisnummer) {
@@ -129,9 +149,9 @@ function buildWhereClause(filters) {
         params.push(filters.maxOppervlakte);
         paramIndex++;
     }
-    if (filters.gebruiksdoel) {
+    if (gebruiksdoel) {
         conditions.push(`$${paramIndex} = ANY(gebruiksdoel)`);
-        params.push(filters.gebruiksdoel);
+        params.push(gebruiksdoel);
         paramIndex++;
     }
     if (filters.minBouwjaar !== undefined) {
@@ -144,9 +164,9 @@ function buildWhereClause(filters) {
         params.push(filters.maxBouwjaar);
         paramIndex++;
     }
-    if (filters.adres_status) {
+    if (adres_status) {
         conditions.push(`adres_status = $${paramIndex}`);
-        params.push(filters.adres_status);
+        params.push(adres_status);
         paramIndex++;
     }
     if (filters.is_bruikbaar !== undefined) {
@@ -426,8 +446,9 @@ async function processCSVExport(job, whereClause, params, nextParamIndex, client
         { key: 'postcode', header: 'Postcode' },
         { key: 'huisnummer', header: 'Huisnummer' },
         { key: 'huisletter', header: 'Huisletter' },
-        { key: 'huisnummertoevoeging', header: 'Toevoeging' },
-        { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummer Toevoeging Gecombineerd' },
+        { key: 'huisnummertoevoeging', header: 'huisnummertoevoeging' },
+        // Include a separate combined column (letter+toevoeging)
+        { key: 'huisnummer_toevoeging_gecombineerd', header: 'huisnummertoevoeging_gecombineerd' },
         { key: 'straat', header: 'Straat' },
         { key: 'woonplaats', header: 'Woonplaats' },
         { key: 'oppervlakte', header: 'Oppervlakte' },
@@ -499,9 +520,14 @@ async function processCSVExport(job, whereClause, params, nextParamIndex, client
                     let huisnummer_toevoeging_gecombineerd = null;
                     if (address.huisletter || address.huisnummertoevoeging) {
                         const letter = address.huisletter?.trim() || '';
-                        const addition = address.huisnummertoevoeging?.trim() || '';
+                        const additionRaw = address.huisnummertoevoeging?.trim() || '';
+                        const addition = additionRaw.replace(/\s+/g, '');
                         if (letter && addition) {
-                            huisnummer_toevoeging_gecombineerd = `${letter}-${addition}`;
+                            // If the addition starts with a digit (e.g. '100', '2a'), do not add a hyphen
+                            // to avoid double dashes when external systems join with huisnummer.
+                            huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
+                                ? `${letter}${addition}`
+                                : `${letter}-${addition}`;
                         }
                         else if (letter) {
                             huisnummer_toevoeging_gecombineerd = letter;
@@ -585,8 +611,8 @@ async function processZIPExport(job, whereClause, params, nextParamIndex, client
         { key: 'postcode', header: 'Postcode' },
         { key: 'huisnummer', header: 'Huisnummer' },
         { key: 'huisletter', header: 'Huisletter' },
-        { key: 'huisnummertoevoeging', header: 'Toevoeging' },
-        { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummer Toevoeging Gecombineerd' },
+        { key: 'huisnummertoevoeging', header: 'huisnummertoevoeging' },
+        { key: 'huisnummer_toevoeging_gecombineerd', header: 'huisnummertoevoeging_gecombineerd' },
         { key: 'straat', header: 'Straat' },
         { key: 'woonplaats', header: 'Woonplaats' },
         { key: 'oppervlakte', header: 'Oppervlakte' },
@@ -657,9 +683,12 @@ async function processZIPExport(job, whereClause, params, nextParamIndex, client
                     let huisnummer_toevoeging_gecombineerd = null;
                     if (address.huisletter || address.huisnummertoevoeging) {
                         const letter = address.huisletter?.trim() || '';
-                        const addition = address.huisnummertoevoeging?.trim() || '';
+                        const additionRaw = address.huisnummertoevoeging?.trim() || '';
+                        const addition = additionRaw.replace(/\s+/g, '');
                         if (letter && addition) {
-                            huisnummer_toevoeging_gecombineerd = `${letter}-${addition}`;
+                            huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
+                                ? `${letter}${addition}`
+                                : `${letter}-${addition}`;
                         }
                         else if (letter) {
                             huisnummer_toevoeging_gecombineerd = letter;
