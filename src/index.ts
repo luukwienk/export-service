@@ -638,6 +638,10 @@ async function processCSVExport(
   const CURSOR_BATCH = 5000;
   const CANCEL_CHECK_INTERVAL = 50000;
 
+  // Use a separate connection for progress updates and cancellation checks
+  // so they are visible outside the cursor transaction.
+  const progressClient = await exportPool.connect();
+
   const chunks: Buffer[] = [];
   // Header row
   chunks.push(Buffer.from(EXPORT_COLUMNS.map(col => col.header).join(',') + '\n', 'utf-8'));
@@ -667,11 +671,11 @@ async function processCSVExport(
 
       totalProcessed += rows.length;
 
-      // Progress update every 5%
+      // Progress update every 5% — via separate connection so it's immediately visible
       const percentComplete = Math.round((totalProcessed / job.count) * 100);
       if (percentComplete !== lastPercentReported && percentComplete % 5 === 0) {
         lastPercentReported = percentComplete;
-        await client.query(
+        await progressClient.query(
           `UPDATE export_jobs
            SET "processedCount" = $1,
                "percentComplete" = $2
@@ -681,9 +685,9 @@ async function processCSVExport(
         console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
       }
 
-      // Cancellation check every 50K rows
+      // Cancellation check every 50K rows — via separate connection
       if (totalProcessed % CANCEL_CHECK_INTERVAL < CURSOR_BATCH) {
-        const jobStatusResult = await client.query(
+        const jobStatusResult = await progressClient.query(
           'SELECT status FROM export_jobs WHERE id = $1',
           [job.id]
         );
@@ -718,7 +722,7 @@ async function processCSVExport(
 
     console.log(`Upload successful. URL: ${blob.url}`);
 
-    await client.query(
+    await progressClient.query(
       `UPDATE export_jobs
        SET status = 'completed',
            "processedCount" = $1,
@@ -731,6 +735,8 @@ async function processCSVExport(
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  } finally {
+    progressClient.release();
   }
 }
 
@@ -745,6 +751,8 @@ async function processZIPExport(
   const zip = new JSZip();
   const CURSOR_BATCH = 5000;
   const CANCEL_CHECK_INTERVAL = 50000;
+
+  const progressClient = await exportPool.connect();
 
   const chunks: Buffer[] = [];
   chunks.push(Buffer.from(EXPORT_COLUMNS.map(col => col.header).join(',') + '\n', 'utf-8'));
@@ -775,7 +783,7 @@ async function processZIPExport(
       const percentComplete = Math.round((totalProcessed / job.count) * 100);
       if (percentComplete !== lastPercentReported && percentComplete % 5 === 0) {
         lastPercentReported = percentComplete;
-        await client.query(
+        await progressClient.query(
           `UPDATE export_jobs
            SET "processedCount" = $1,
                "percentComplete" = $2
@@ -786,7 +794,7 @@ async function processZIPExport(
       }
 
       if (totalProcessed % CANCEL_CHECK_INTERVAL < CURSOR_BATCH) {
-        const jobStatusResult = await client.query(
+        const jobStatusResult = await progressClient.query(
           'SELECT status FROM export_jobs WHERE id = $1',
           [job.id]
         );
@@ -833,7 +841,7 @@ This file contains address data exported from ContactBuddy.nl.
 
     console.log(`Upload successful. URL: ${blob.url}`);
 
-    await client.query(
+    await progressClient.query(
       `UPDATE export_jobs
        SET status = 'completed',
            "processedCount" = $1,
@@ -846,6 +854,8 @@ This file contains address data exported from ContactBuddy.nl.
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  } finally {
+    progressClient.release();
   }
 }
 
