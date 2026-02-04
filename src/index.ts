@@ -542,11 +542,89 @@ interface Address {
   [key: string]: any; // Add index signature
 }
 
-interface AddressCursor {
-  postcode: string;
-  huisnummer: number;
-  huisletter: string | null;
-  huisnummertoevoeging: string | null;
+const EXPORT_COLUMNS = [
+  { key: 'postcode', header: 'Postcode' },
+  { key: 'huisnummer', header: 'Huisnummer' },
+  { key: 'huisletter', header: 'Huisletter' },
+  { key: 'huisnummertoevoeging', header: 'Nummer Toevoeging' },
+  { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummertoevoeging' },
+  { key: 'straat', header: 'Straat' },
+  { key: 'woonplaats', header: 'Woonplaats' },
+  { key: 'oppervlakte', header: 'Oppervlakte' },
+  { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
+  { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
+  { key: 'latitude', header: 'Latitude' },
+  { key: 'longitude', header: 'Longitude' },
+  { key: 'rd_x', header: 'RD X' },
+  { key: 'rd_y', header: 'RD Y' },
+  { key: 'is_ligplaats', header: 'Is Ligplaats' },
+  { key: 'is_standplaats', header: 'Is Standplaats' },
+  { key: 'is_verblijfsobject', header: 'Is Verblijfsobject' },
+  { key: 'status', header: 'Status' }
+];
+
+function processAddress(address: Address): Address {
+  let huisnummer_toevoeging_gecombineerd = null;
+  if (address.huisletter || address.huisnummertoevoeging) {
+    const letter = address.huisletter?.trim() || '';
+    const additionRaw = address.huisnummertoevoeging?.trim() || '';
+    const addition = additionRaw.replace(/\s+/g, '');
+    if (letter && addition) {
+      huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
+        ? `${letter}${addition}`
+        : `${letter}-${addition}`;
+    } else if (letter) {
+      huisnummer_toevoeging_gecombineerd = letter;
+    } else if (addition) {
+      huisnummer_toevoeging_gecombineerd = addition;
+    }
+  }
+
+  return {
+    ...address,
+    gebruiksdoel: Array.isArray(address.gebruiksdoel)
+      ? address.gebruiksdoel.join(', ')
+      : address.gebruiksdoel,
+    huisnummer_toevoeging_gecombineerd
+  };
+}
+
+function addressToCSVRow(address: Address): string {
+  return EXPORT_COLUMNS.map(col => {
+    const value = address[col.key];
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+      return `"${value.replace(/"/g, '""')}"`;
+    }
+    return value;
+  }).join(',');
+}
+
+function buildCursorQuery(whereClause: string): string {
+  return `
+    SELECT
+      "postcode",
+      "huisnummer",
+      "huisletter",
+      "huisnummertoevoeging",
+      "straat",
+      "woonplaats",
+      "oppervlakte",
+      "gebruiksdoel",
+      "oorspronkelijkBouwjaar",
+      "latitude",
+      "longitude",
+      "rd_x",
+      "rd_y",
+      "is_ligplaats",
+      "is_standplaats",
+      "is_verblijfsobject",
+      "adres_status" AS "status"
+    FROM address_export
+    ${whereClause ? `WHERE ${whereClause}` : ''}
+    ORDER BY "postcode", "huisnummer",
+             COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
+  `;
 }
 
 async function processCSVExport(
@@ -557,182 +635,91 @@ async function processCSVExport(
   client: any,
   filename: string
 ): Promise<void> {
-  // Define columns
-  const columns = [
-    { key: 'postcode', header: 'Postcode' },
-    { key: 'huisnummer', header: 'Huisnummer' },
-    { key: 'huisletter', header: 'Huisletter' },
-    { key: 'huisnummertoevoeging', header: 'Nummer Toevoeging' },
-    // Include a separate combined column (letter+toevoeging)
-    { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummertoevoeging' },
-    { key: 'straat', header: 'Straat' },
-    { key: 'woonplaats', header: 'Woonplaats' },
-    { key: 'oppervlakte', header: 'Oppervlakte' },
-    { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
-    { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
-    { key: 'latitude', header: 'Latitude' },
-    { key: 'longitude', header: 'Longitude' },
-    { key: 'rd_x', header: 'RD X' },
-    { key: 'rd_y', header: 'RD Y' },
-    { key: 'is_ligplaats', header: 'Is Ligplaats' },
-    { key: 'is_standplaats', header: 'Is Standplaats' },
-    { key: 'is_verblijfsobject', header: 'Is Verblijfsobject' },
-    { key: 'status', header: 'Status' }
-  ];
-  
-  // Create a CSV buffer to hold all data
-  let csvContent = columns.map(col => col.header).join(',') + '\n';
-  
-  // Process in batches with OFFSET pagination
-  const batchSize = job.filters.batchSize || 200000;
-  const chunkSize = 20000;  // Process in smaller chunks for memory efficiency
-  let offset = 0;
-  let hasMoreRecords = true;
-  let totalProcessed = 0;
-  
-  while (hasMoreRecords) {
-    // Check if job was cancelled
-    const jobStatusResult = await client.query(
-      'SELECT status FROM export_jobs WHERE id = $1',
-      [job.id]
-    );
-    
-    if (jobStatusResult.rows[0]?.status === 'cancelled') {
-      console.log(`Export job ${job.id} was cancelled, stopping processing`);
-      break;
-    }
-    
-    // Build and execute query with OFFSET
-    let query = `
-      SELECT 
-        "postcode",
-        "huisnummer",
-        "huisletter",
-        "huisnummertoevoeging",
-        "straat",
-        "woonplaats",
-        "oppervlakte",
-        "gebruiksdoel",
-        "oorspronkelijkBouwjaar",
-        "latitude",
-        "longitude",
-        "rd_x",
-        "rd_y",
-        "is_ligplaats",
-        "is_standplaats",
-        "is_verblijfsobject",
-        "adres_status" AS "status"
-      FROM address_export
-      ${whereClause ? `WHERE ${whereClause}` : ''}
-      ORDER BY "postcode", "huisnummer", 
-               COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
-      LIMIT ${batchSize} OFFSET ${offset}
-    `;
-    
-    const addressesResult = await client.query(query, params);
-    const addresses = addressesResult.rows;
-    
-    console.log(`Batch query returned ${addresses.length} addresses`);
-    
-    if (addresses.length === 0 || addresses.length < batchSize) {
-      hasMoreRecords = false;
-    }
-    
-    if (addresses.length > 0) {
-      // Process in smaller chunks to avoid memory issues
-      for (let i = 0; i < addresses.length; i += chunkSize) {
-        const chunk = addresses.slice(i, i + chunkSize);
-        
-        // Process the gebruiksdoel array to a comma-separated string and add combined field
-        const processedAddresses: Address[] = chunk.map((address: Address) => {
-          // Combine huisletter and huisnummertoevoeging
-          let huisnummer_toevoeging_gecombineerd = null;
-          if (address.huisletter || address.huisnummertoevoeging) {
-            const letter = address.huisletter?.trim() || '';
-            const additionRaw = address.huisnummertoevoeging?.trim() || '';
-            const addition = additionRaw.replace(/\s+/g, '');
-            if (letter && addition) {
-              // If the addition starts with a digit (e.g. '100', '2a'), do not add a hyphen
-              // to avoid double dashes when external systems join with huisnummer.
-              huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
-                ? `${letter}${addition}`
-                : `${letter}-${addition}`;
-            } else if (letter) {
-              huisnummer_toevoeging_gecombineerd = letter;
-            } else if (addition) {
-              huisnummer_toevoeging_gecombineerd = addition;
-            }
-          }
-          
-          return {
-            ...address,
-            gebruiksdoel: Array.isArray(address.gebruiksdoel) 
-              ? address.gebruiksdoel.join(', ') 
-              : address.gebruiksdoel,
-            huisnummer_toevoeging_gecombineerd
-          };
-        });
-        
-        // Convert to CSV rows and add to content
-        for (const address of processedAddresses) {
-          const row = columns.map(col => {
-            const value = address[col.key];
-            // Properly escape and quote CSV values
-            if (value === null || value === undefined) return '';
-            if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
-              return `"${value.replace(/"/g, '""')}"`;
-            }
-            return value;
-          }).join(',');
-          csvContent += row + '\n';
-        }
-        
-        // Update counters
-        totalProcessed += chunk.length;
-        
-        // Calculate percentage complete
-        const percentComplete = Math.round((totalProcessed / job.count) * 100);
-        
-        // Only update database every 5% progress to reduce updates
-        if (percentComplete % 5 === 0 || i + chunkSize >= addresses.length) {
-          await client.query(
-            `UPDATE export_jobs 
-             SET "processedCount" = $1, 
-                 "percentComplete" = $2 
-             WHERE id = $3 AND "percentComplete" < $2`,
-            [totalProcessed, percentComplete, job.id]
-          );
-          
-          console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+  const CURSOR_BATCH = 5000;
+  const CANCEL_CHECK_INTERVAL = 50000;
+
+  const chunks: Buffer[] = [];
+  // Header row
+  chunks.push(Buffer.from(EXPORT_COLUMNS.map(col => col.header).join(',') + '\n', 'utf-8'));
+
+  // Use a server-side cursor for sequential scan (no OFFSET degradation)
+  await client.query('BEGIN');
+  try {
+    const cursorQuery = buildCursorQuery(whereClause);
+    await client.query(`DECLARE export_cursor CURSOR FOR ${cursorQuery}`, params);
+
+    let totalProcessed = 0;
+    let lastPercentReported = -1;
+    let cancelled = false;
+
+    while (true) {
+      const result = await client.query(`FETCH ${CURSOR_BATCH} FROM export_cursor`);
+      const rows = result.rows;
+      if (rows.length === 0) break;
+
+      // Convert batch to CSV lines and collect as Buffer
+      const lines: string[] = [];
+      for (const row of rows) {
+        const processed = processAddress(row);
+        lines.push(addressToCSVRow(processed));
+      }
+      chunks.push(Buffer.from(lines.join('\n') + '\n', 'utf-8'));
+
+      totalProcessed += rows.length;
+
+      // Progress update every 5%
+      const percentComplete = Math.round((totalProcessed / job.count) * 100);
+      if (percentComplete !== lastPercentReported && percentComplete % 5 === 0) {
+        lastPercentReported = percentComplete;
+        await client.query(
+          `UPDATE export_jobs
+           SET "processedCount" = $1,
+               "percentComplete" = $2
+           WHERE id = $3 AND "percentComplete" < $2`,
+          [totalProcessed, percentComplete, job.id]
+        );
+        console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+      }
+
+      // Cancellation check every 50K rows
+      if (totalProcessed % CANCEL_CHECK_INTERVAL < CURSOR_BATCH) {
+        const jobStatusResult = await client.query(
+          'SELECT status FROM export_jobs WHERE id = $1',
+          [job.id]
+        );
+        if (jobStatusResult.rows[0]?.status === 'cancelled') {
+          console.log(`Export job ${job.id} was cancelled, stopping processing`);
+          cancelled = true;
+          break;
         }
       }
-      
-      // Update offset for next batch
-      offset += addresses.length;
     }
-  }
-  
-  console.log(`CSV generation complete. Total size: ${csvContent.length} bytes`);
-  
-  // Convert content to readable stream with UTF-8 BOM for proper Excel encoding
-  const BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
-  const contentBuffer = Buffer.from(csvContent, 'utf-8');
-  const bufferWithBOM = Buffer.concat([BOM, contentBuffer]);
-  const readableStream = Readable.from(bufferWithBOM);
-  
-  // Upload to Vercel Blob Storage
-  try {
+
+    await client.query('CLOSE export_cursor');
+    await client.query('COMMIT');
+
+    if (cancelled) return;
+
+    // Assemble final buffer with BOM
+    const BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
+    const totalSize = BOM.length + chunks.reduce((sum, c) => sum + c.length, 0);
+    const bufferWithBOM = Buffer.concat([BOM, ...chunks], totalSize);
+
+    console.log(`CSV generation complete. Total size: ${bufferWithBOM.length} bytes`);
+
+    const readableStream = Readable.from(bufferWithBOM);
+
+    // Upload to Vercel Blob Storage
     console.log(`Uploading CSV to Vercel Blob Storage as ${filename}`);
     const blob = await put(filename, readableStream, {
       contentType: 'text/csv; charset=utf-8',
       access: 'public',
     });
-    
+
     console.log(`Upload successful. URL: ${blob.url}`);
-    
-    // Update job to completed
+
     await client.query(
-      `UPDATE export_jobs 
+      `UPDATE export_jobs
        SET status = 'completed',
            "processedCount" = $1,
            "percentComplete" = 100,
@@ -741,9 +728,8 @@ async function processCSVExport(
        WHERE id = $3`,
       [totalProcessed, blob.url, job.id]
     );
-    
   } catch (error) {
-    console.error('Error uploading to Vercel Blob Storage:', error);
+    await client.query('ROLLBACK');
     throw error;
   }
 }
@@ -756,195 +742,99 @@ async function processZIPExport(
   client: any,
   filename: string
 ): Promise<void> {
-  // Create a new JSZip instance
   const zip = new JSZip();
-  
-  // Define columns
-  const columns = [
-    { key: 'postcode', header: 'Postcode' },
-    { key: 'huisnummer', header: 'Huisnummer' },
-    { key: 'huisletter', header: 'Huisletter' },
-    { key: 'huisnummertoevoeging', header: 'Nummer Toevoeging' },
-    { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummertoevoeging' },
-    { key: 'straat', header: 'Straat' },
-    { key: 'woonplaats', header: 'Woonplaats' },
-    { key: 'oppervlakte', header: 'Oppervlakte' },
-    { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
-    { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
-    { key: 'latitude', header: 'Latitude' },
-    { key: 'longitude', header: 'Longitude' },
-    { key: 'rd_x', header: 'RD X' },
-    { key: 'rd_y', header: 'RD Y' },
-    { key: 'is_ligplaats', header: 'Is Ligplaats' },
-    { key: 'is_standplaats', header: 'Is Standplaats' },
-    { key: 'is_verblijfsobject', header: 'Is Verblijfsobject' },
-    { key: 'status', header: 'Status' }
-  ];
-  
-  // Create a CSV file inside the ZIP
-  let csvContent = columns.map(col => col.header).join(',') + '\n';
-  
-  // Process in batches with OFFSET pagination
-  const batchSize = job.filters.batchSize || 100000;
-  const chunkSize = 10000;  // Process in smaller chunks for memory efficiency
-  let offset = 0;
-  let hasMoreRecords = true;
-  let totalProcessed = 0;
-  
-  while (hasMoreRecords) {
-    // Check if job was cancelled
-    const jobStatusResult = await client.query(
-      'SELECT status FROM export_jobs WHERE id = $1',
-      [job.id]
-    );
-    
-    if (jobStatusResult.rows[0]?.status === 'cancelled') {
-      console.log(`Export job ${job.id} was cancelled, stopping processing`);
-      break;
-    }
-    
-    // Build and execute query with OFFSET
-    let query = `
-      SELECT 
-        "postcode",
-        "huisnummer",
-        "huisletter",
-        "huisnummertoevoeging",
-        "straat",
-        "woonplaats",
-        "oppervlakte",
-        "gebruiksdoel",
-        "oorspronkelijkBouwjaar",
-        "latitude",
-        "longitude",
-        "rd_x",
-        "rd_y",
-        "is_ligplaats",
-        "is_standplaats",
-        "is_verblijfsobject",
-        "adres_status" AS "status"
-      FROM address_export
-      ${whereClause ? `WHERE ${whereClause}` : ''}
-      ORDER BY "postcode", "huisnummer", 
-               COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
-      LIMIT ${batchSize} OFFSET ${offset}
-    `;
-    
-    const addressesResult = await client.query(query, params);
-    const addresses = addressesResult.rows;
-    
-    if (addresses.length === 0 || addresses.length < batchSize) {
-      hasMoreRecords = false;
-    }
-    
-    if (addresses.length > 0) {
-      // Process in smaller chunks to avoid memory issues
-      for (let i = 0; i < addresses.length; i += chunkSize) {
-        const chunk = addresses.slice(i, i + chunkSize);
-        
-        // Process the gebruiksdoel array to a comma-separated string and add combined field
-        const processedAddresses: Address[] = chunk.map((address: Address) => {
-          // Combine huisletter and huisnummertoevoeging
-          let huisnummer_toevoeging_gecombineerd = null;
-          if (address.huisletter || address.huisnummertoevoeging) {
-            const letter = address.huisletter?.trim() || '';
-            const additionRaw = address.huisnummertoevoeging?.trim() || '';
-            const addition = additionRaw.replace(/\s+/g, '');
-            if (letter && addition) {
-              huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
-                ? `${letter}${addition}`
-                : `${letter}-${addition}`;
-            } else if (letter) {
-              huisnummer_toevoeging_gecombineerd = letter;
-            } else if (addition) {
-              huisnummer_toevoeging_gecombineerd = addition;
-            }
-          }
-          
-          return {
-            ...address,
-            gebruiksdoel: Array.isArray(address.gebruiksdoel) 
-              ? address.gebruiksdoel.join(', ') 
-              : address.gebruiksdoel,
-            huisnummer_toevoeging_gecombineerd
-          };
-        });
-        
-        // Convert to CSV rows and add to content
-        for (const address of processedAddresses) {
-          const row = columns.map(col => {
-            const value = address[col.key];
-            // Properly escape and quote CSV values
-            if (value === null || value === undefined) return '';
-            if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
-              return `"${value.replace(/"/g, '""')}"`;
-            }
-            return value;
-          }).join(',');
-          csvContent += row + '\n';
-        }
-        
-        // Update counters
-        totalProcessed += chunk.length;
-        
-        // Calculate percentage complete
-        const percentComplete = Math.round((totalProcessed / job.count) * 100);
-        
-        // Only update database every 5% progress to reduce updates
-        if (percentComplete % 5 === 0 || i + chunkSize >= addresses.length) {
-          await client.query(
-            `UPDATE export_jobs 
-             SET "processedCount" = $1, 
-                 "percentComplete" = $2 
-             WHERE id = $3 AND "percentComplete" < $2`,
-            [totalProcessed, percentComplete, job.id]
-          );
-          
-          console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+  const CURSOR_BATCH = 5000;
+  const CANCEL_CHECK_INTERVAL = 50000;
+
+  const chunks: Buffer[] = [];
+  chunks.push(Buffer.from(EXPORT_COLUMNS.map(col => col.header).join(',') + '\n', 'utf-8'));
+
+  await client.query('BEGIN');
+  try {
+    const cursorQuery = buildCursorQuery(whereClause);
+    await client.query(`DECLARE export_cursor CURSOR FOR ${cursorQuery}`, params);
+
+    let totalProcessed = 0;
+    let lastPercentReported = -1;
+    let cancelled = false;
+
+    while (true) {
+      const result = await client.query(`FETCH ${CURSOR_BATCH} FROM export_cursor`);
+      const rows = result.rows;
+      if (rows.length === 0) break;
+
+      const lines: string[] = [];
+      for (const row of rows) {
+        const processed = processAddress(row);
+        lines.push(addressToCSVRow(processed));
+      }
+      chunks.push(Buffer.from(lines.join('\n') + '\n', 'utf-8'));
+
+      totalProcessed += rows.length;
+
+      const percentComplete = Math.round((totalProcessed / job.count) * 100);
+      if (percentComplete !== lastPercentReported && percentComplete % 5 === 0) {
+        lastPercentReported = percentComplete;
+        await client.query(
+          `UPDATE export_jobs
+           SET "processedCount" = $1,
+               "percentComplete" = $2
+           WHERE id = $3 AND "percentComplete" < $2`,
+          [totalProcessed, percentComplete, job.id]
+        );
+        console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+      }
+
+      if (totalProcessed % CANCEL_CHECK_INTERVAL < CURSOR_BATCH) {
+        const jobStatusResult = await client.query(
+          'SELECT status FROM export_jobs WHERE id = $1',
+          [job.id]
+        );
+        if (jobStatusResult.rows[0]?.status === 'cancelled') {
+          console.log(`Export job ${job.id} was cancelled, stopping processing`);
+          cancelled = true;
+          break;
         }
       }
-      
-      // Update offset for next batch
-      offset += addresses.length;
     }
-  }
-  
-  // Add CSV file to the ZIP
-  const csvFilename = filename.replace('.zip', '.csv');
-  zip.file(csvFilename, csvContent);
-  
-  // Add a README file to the ZIP
-  const readmeContent = `Export Details
+
+    await client.query('CLOSE export_cursor');
+    await client.query('COMMIT');
+
+    if (cancelled) return;
+
+    // Assemble CSV content as a single Buffer for ZIP
+    const csvBuffer = Buffer.concat(chunks);
+    console.log(`CSV generation complete. Total size: ${csvBuffer.length} bytes`);
+
+    const csvFilename = filename.replace('.zip', '.csv');
+    zip.file(csvFilename, csvBuffer);
+
+    const readmeContent = `Export Details
 Date: ${new Date().toISOString()}
 Total Records: ${totalProcessed}
 Filters: ${JSON.stringify(job.filters, null, 2)}
-  
+
 This file contains address data exported from ContactBuddy.nl.
 `;
-  
-  zip.file('README.txt', readmeContent);
-  
-  // Generate ZIP file
-  console.log('Generating ZIP file...');
-  const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
-  console.log(`ZIP generation complete. Total size: ${zipContent.length} bytes`);
-  
-  // Convert content to readable stream
-  const readableStream = Readable.from(zipContent);
-  
-  // Upload to Vercel Blob Storage
-  try {
+    zip.file('README.txt', readmeContent);
+
+    console.log('Generating ZIP file...');
+    const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
+    console.log(`ZIP generation complete. Total size: ${zipContent.length} bytes`);
+
+    const readableStream = Readable.from(zipContent);
+
     console.log(`Uploading ZIP to Vercel Blob Storage as ${filename}`);
     const blob = await put(filename, readableStream, {
       contentType: 'application/zip',
       access: 'public',
     });
-    
+
     console.log(`Upload successful. URL: ${blob.url}`);
-    
-    // Update job to completed
+
     await client.query(
-      `UPDATE export_jobs 
+      `UPDATE export_jobs
        SET status = 'completed',
            "processedCount" = $1,
            "percentComplete" = 100,
@@ -953,9 +843,8 @@ This file contains address data exported from ContactBuddy.nl.
        WHERE id = $3`,
       [totalProcessed, blob.url, job.id]
     );
-    
   } catch (error) {
-    console.error('Error uploading to Vercel Blob Storage:', error);
+    await client.query('ROLLBACK');
     throw error;
   }
 }
