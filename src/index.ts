@@ -634,7 +634,7 @@ function buildCursorQuery(whereClause: string): string {
       woz."wozPeildatum" AS "woz_peildatum"
     FROM address_export ae
     LEFT JOIN energy_label_enrichment el
-      ON el."verblijfsobjectId" = REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', '')
+      ON el."verblijfsobjectId" = LPAD(REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', ''), 16, '0')
     LEFT JOIN woz_address_enrichment woz
       ON woz."verblijfsobjectId" = ae.object_id
     ${whereClause ? `WHERE ${whereClause}` : ''}
