@@ -104,9 +104,9 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
 
   if (search) {
     conditions.push(`(
-      straat ILIKE $${paramIndex} OR
-      woonplaats ILIKE $${paramIndex + 1} OR
-      postcode ILIKE $${paramIndex + 2}
+      ae.straat ILIKE $${paramIndex} OR
+      ae.woonplaats ILIKE $${paramIndex + 1} OR
+      ae.postcode ILIKE $${paramIndex + 2}
     )`);
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     paramIndex += 3;
@@ -116,7 +116,7 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
     // Use exact matching with cleaned postcode - consistent with frontend
     const cleanPostcode = filters.postcode.replace(/\s+/g, '').toUpperCase();
     if (cleanPostcode) {
-      conditions.push(`postcode = $${paramIndex}`);
+      conditions.push(`ae.postcode = $${paramIndex}`);
       params.push(cleanPostcode);
       paramIndex++;
     }
@@ -128,69 +128,69 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
   const rangeFrom = typeof rangeFromRaw === 'string' ? rangeFromRaw.replace(/\s+/g, '').toUpperCase() : undefined;
   const rangeTo = typeof rangeToRaw === 'string' ? rangeToRaw.replace(/\s+/g, '').toUpperCase() : undefined;
   if (rangeFrom && rangeTo) {
-    conditions.push(`postcode >= $${paramIndex} AND postcode <= $${paramIndex + 1}`);
+    conditions.push(`ae.postcode >= $${paramIndex} AND ae.postcode <= $${paramIndex + 1}`);
     params.push(rangeFrom, rangeTo);
     paramIndex += 2;
   }
 
   if (straat) {
     // Exact matching to align with frontend behavior
-    conditions.push(`straat = $${paramIndex}`);
+    conditions.push(`ae.straat = $${paramIndex}`);
     params.push(straat);
     paramIndex++;
   }
 
   if (woonplaats) {
     // Exact matching to align with frontend behavior
-    conditions.push(`woonplaats = $${paramIndex}`);
+    conditions.push(`ae.woonplaats = $${paramIndex}`);
     params.push(woonplaats);
     paramIndex++;
   }
 
   if (filters.huisnummer) {
-    conditions.push(`huisnummer = $${paramIndex}`);
+    conditions.push(`ae.huisnummer = $${paramIndex}`);
     params.push(filters.huisnummer);
     paramIndex++;
   }
 
   if (filters.isOppervlakteActive && filters.minOppervlakte !== undefined) {
-    conditions.push(`oppervlakte >= $${paramIndex}`);
+    conditions.push(`ae.oppervlakte >= $${paramIndex}`);
     params.push(filters.minOppervlakte);
     paramIndex++;
   }
 
   if (filters.isOppervlakteActive && filters.maxOppervlakte !== undefined) {
-    conditions.push(`oppervlakte <= $${paramIndex}`);
+    conditions.push(`ae.oppervlakte <= $${paramIndex}`);
     params.push(filters.maxOppervlakte);
     paramIndex++;
   }
 
   if (gebruiksdoel) {
-    conditions.push(`$${paramIndex} = ANY(gebruiksdoel)`);
+    conditions.push(`$${paramIndex} = ANY(ae.gebruiksdoel)`);
     params.push(gebruiksdoel);
     paramIndex++;
   }
 
   if (filters.minBouwjaar !== undefined) {
-    conditions.push(`"oorspronkelijkBouwjaar" >= $${paramIndex}`);
+    conditions.push(`ae."oorspronkelijkBouwjaar" >= $${paramIndex}`);
     params.push(filters.minBouwjaar);
     paramIndex++;
   }
 
   if (filters.maxBouwjaar !== undefined) {
-    conditions.push(`"oorspronkelijkBouwjaar" <= $${paramIndex}`);
+    conditions.push(`ae."oorspronkelijkBouwjaar" <= $${paramIndex}`);
     params.push(filters.maxBouwjaar);
     paramIndex++;
   }
 
   if (adres_status) {
-    conditions.push(`adres_status = $${paramIndex}`);
+    conditions.push(`ae.adres_status = $${paramIndex}`);
     params.push(adres_status);
     paramIndex++;
   }
 
   if (filters.is_bruikbaar !== undefined) {
-    conditions.push(`is_bruikbaar = $${paramIndex}`);
+    conditions.push(`ae.is_bruikbaar = $${paramIndex}`);
     params.push(filters.is_bruikbaar);
     paramIndex++;
   }
@@ -259,7 +259,7 @@ app.post('/api/addresses/export', authenticate, async (req, res) => {
     const client = await exportPool.connect();
     
     try {
-      let countQuery = 'SELECT COUNT(*) as count FROM address_export';
+      let countQuery = 'SELECT COUNT(*) as count FROM address_export ae';
       if (whereClause) {
         countQuery += ` WHERE ${whereClause}`;
       }
@@ -553,6 +553,9 @@ const EXPORT_COLUMNS = [
   { key: 'oppervlakte', header: 'Oppervlakte' },
   { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
   { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
+  { key: 'energieklasse', header: 'Energielabel' },
+  { key: 'woz_waarde', header: 'WOZ Waarde' },
+  { key: 'woz_peildatum', header: 'WOZ Peildatum' },
   { key: 'latitude', header: 'Latitude' },
   { key: 'longitude', header: 'Longitude' },
   { key: 'rd_x', header: 'RD X' },
@@ -580,12 +583,18 @@ function processAddress(address: Address): Address {
     }
   }
 
+  // Format WOZ peildatum as YYYY-MM-DD
+  const woz_peildatum = address.woz_peildatum
+    ? new Date(address.woz_peildatum).toISOString().split('T')[0]
+    : null;
+
   return {
     ...address,
     gebruiksdoel: Array.isArray(address.gebruiksdoel)
       ? address.gebruiksdoel.join(', ')
       : address.gebruiksdoel,
-    huisnummer_toevoeging_gecombineerd
+    huisnummer_toevoeging_gecombineerd,
+    woz_peildatum
   };
 }
 
@@ -603,27 +612,34 @@ function addressToCSVRow(address: Address): string {
 function buildCursorQuery(whereClause: string): string {
   return `
     SELECT
-      "postcode",
-      "huisnummer",
-      "huisletter",
-      "huisnummertoevoeging",
-      "straat",
-      "woonplaats",
-      "oppervlakte",
-      "gebruiksdoel",
-      "oorspronkelijkBouwjaar",
-      "latitude",
-      "longitude",
-      "rd_x",
-      "rd_y",
-      "is_ligplaats",
-      "is_standplaats",
-      "is_verblijfsobject",
-      "adres_status" AS "status"
-    FROM address_export
+      ae."postcode",
+      ae."huisnummer",
+      ae."huisletter",
+      ae."huisnummertoevoeging",
+      ae."straat",
+      ae."woonplaats",
+      ae."oppervlakte",
+      ae."gebruiksdoel",
+      ae."oorspronkelijkBouwjaar",
+      ae."latitude",
+      ae."longitude",
+      ae."rd_x",
+      ae."rd_y",
+      ae."is_ligplaats",
+      ae."is_standplaats",
+      ae."is_verblijfsobject",
+      ae."adres_status" AS "status",
+      el."energieKlasse" AS "energieklasse",
+      woz."wozWaarde" AS "woz_waarde",
+      woz."wozPeildatum" AS "woz_peildatum"
+    FROM address_export ae
+    LEFT JOIN energy_label_enrichment el
+      ON el."verblijfsobjectId" = REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', '')
+    LEFT JOIN woz_address_enrichment woz
+      ON woz."verblijfsobjectId" = ae.object_id
     ${whereClause ? `WHERE ${whereClause}` : ''}
-    ORDER BY "postcode", "huisnummer",
-             COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
+    ORDER BY ae."postcode", ae."huisnummer",
+             COALESCE(ae."huisletter", ''), COALESCE(ae."huisnummertoevoeging", '')
   `;
 }
 
