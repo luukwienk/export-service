@@ -931,21 +931,25 @@ This file contains address data exported from ContactBuddy.nl.
 
 const MAX_ENRICHMENT_ROWS = 100_000;
 
-const ENRICHMENT_COLUMNS = [
-  { key: 'oppervlakte', header: 'Oppervlakte' },
-  { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
-  { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
-  { key: 'energieklasse', header: 'Energielabel' },
-  { key: 'woz_waarde', header: 'WOZ Waarde' },
-  { key: 'woz_peildatum', header: 'WOZ Peildatum' },
-  { key: 'latitude', header: 'Latitude' },
-  { key: 'longitude', header: 'Longitude' },
-  { key: 'rd_x', header: 'RD X' },
-  { key: 'rd_y', header: 'RD Y' },
-  { key: 'object_id', header: 'Object ID' },
-  { key: 'straat', header: 'Straat (BAG)' },
-  { key: 'woonplaats', header: 'Woonplaats (BAG)' },
+type EnrichmentCategory = 'bag' | 'coordinaten' | 'energielabel' | 'woz' | 'adres';
+
+const ALL_ENRICHMENT_COLUMNS = [
+  { key: 'oppervlakte', header: 'Oppervlakte', category: 'bag' as EnrichmentCategory },
+  { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar', category: 'bag' as EnrichmentCategory },
+  { key: 'gebruiksdoel', header: 'Gebruiksdoel', category: 'bag' as EnrichmentCategory },
+  { key: 'energieklasse', header: 'Energielabel', category: 'energielabel' as EnrichmentCategory },
+  { key: 'woz_waarde', header: 'WOZ Waarde', category: 'woz' as EnrichmentCategory },
+  { key: 'woz_peildatum', header: 'WOZ Peildatum', category: 'woz' as EnrichmentCategory },
+  { key: 'latitude', header: 'Latitude', category: 'coordinaten' as EnrichmentCategory },
+  { key: 'longitude', header: 'Longitude', category: 'coordinaten' as EnrichmentCategory },
+  { key: 'rd_x', header: 'RD X', category: 'coordinaten' as EnrichmentCategory },
+  { key: 'rd_y', header: 'RD Y', category: 'coordinaten' as EnrichmentCategory },
+  { key: 'object_id', header: 'Object ID', category: 'bag' as EnrichmentCategory },
+  { key: 'straat', header: 'Straat (BAG)', category: 'adres' as EnrichmentCategory },
+  { key: 'woonplaats', header: 'Woonplaats (BAG)', category: 'adres' as EnrichmentCategory },
 ];
+
+const ALL_CATEGORIES: EnrichmentCategory[] = ['bag', 'coordinaten', 'energielabel', 'woz', 'adres'];
 
 app.post('/api/addresses/enrich', authenticate, (req: express.Request, res: express.Response, next: express.NextFunction) => {
   upload.single('file')(req, res, (err: any) => {
@@ -1002,6 +1006,18 @@ app.post('/api/addresses/enrich', authenticate, (req: express.Request, res: expr
       });
     }
 
+    // Parse enrichment categories
+    let categories: EnrichmentCategory[] = ALL_CATEGORIES;
+    const categoriesParam = req.body?.categories || (req as any).body?.categories;
+    if (typeof categoriesParam === 'string') {
+      try {
+        const parsed = JSON.parse(categoriesParam);
+        if (Array.isArray(parsed) && parsed.every((c: string) => ALL_CATEGORIES.includes(c as EnrichmentCategory))) {
+          categories = parsed;
+        }
+      } catch {}
+    }
+
     // Detect columns
     const allHeaders = Object.keys(records[0]);
     const columnMapping = detectColumns(allHeaders);
@@ -1029,7 +1045,7 @@ app.post('/api/addresses/enrich', authenticate, (req: express.Request, res: expr
     });
 
     // Fire and forget
-    processEnrichment(job.id, records, allHeaders, columnMapping, delimiter).catch(error => {
+    processEnrichment(job.id, records, allHeaders, columnMapping, delimiter, categories).catch(error => {
       console.error('Error in enrichment processing:', error);
       prisma.exportJob.update({
         where: { id: job.id },
@@ -1063,7 +1079,8 @@ async function processEnrichment(
   records: Record<string, string>[],
   allHeaders: string[],
   columnMapping: ColumnMapping,
-  delimiter: string = ','
+  delimiter: string = ',',
+  categories: EnrichmentCategory[] = ALL_CATEGORIES
 ): Promise<void> {
   const startTime = Date.now();
   const client = await exportPool.connect();
@@ -1139,25 +1156,45 @@ async function processEnrichment(
     console.log(`Enrichment ${jobId}: Phase 1 complete`);
 
     // Phase 2: Enrich via JOIN (30-90%)
-    console.log(`Enrichment ${jobId}: Phase 2 - Enrichment query`);
+    console.log(`Enrichment ${jobId}: Phase 2 - Enrichment query (categories: ${categories.join(', ')})`);
 
-    const enrichmentQuery = `
-      SELECT ci.row_num,
-        ae."oppervlakte", ae."gebruiksdoel", ae."oorspronkelijkBouwjaar",
-        ae."latitude", ae."longitude", ae."rd_x", ae."rd_y",
-        ae."object_id", ae."straat", ae."woonplaats",
-        el."energieKlasse" AS "energieklasse",
-        woz."wozWaarde" AS "woz_waarde",
-        woz."wozPeildatum" AS "woz_peildatum"
-      FROM csv_input ci
-      LEFT JOIN address_export ae
+    // Filter columns based on selected categories
+    const activeColumns = ALL_ENRICHMENT_COLUMNS.filter(c => categories.includes(c.category));
+    const needsAe = categories.some(c => ['bag', 'coordinaten', 'adres'].includes(c));
+    const needsEl = categories.includes('energielabel');
+    const needsWoz = categories.includes('woz');
+
+    // Build SELECT columns dynamically
+    const selectColumns: string[] = ['ci.row_num'];
+    if (needsAe) {
+      if (categories.includes('bag')) selectColumns.push('ae."oppervlakte"', 'ae."gebruiksdoel"', 'ae."oorspronkelijkBouwjaar"', 'ae."object_id"');
+      if (categories.includes('coordinaten')) selectColumns.push('ae."latitude"', 'ae."longitude"', 'ae."rd_x"', 'ae."rd_y"');
+      if (categories.includes('adres')) selectColumns.push('ae."straat"', 'ae."woonplaats"');
+    }
+    if (needsEl) selectColumns.push('el."energieKlasse" AS "energieklasse"');
+    if (needsWoz) selectColumns.push('woz."wozWaarde" AS "woz_waarde"', 'woz."wozPeildatum" AS "woz_peildatum"');
+
+    // Build JOINs dynamically
+    const joins: string[] = [];
+    if (needsAe || needsEl || needsWoz) {
+      joins.push(`LEFT JOIN address_export ae
         ON ae.postcode = ci.postcode AND ae.huisnummer = ci.huisnummer
         AND (ci.huisletter IS NULL OR ae.huisletter = ci.huisletter)
-        AND (ci.huisnummertoevoeging IS NULL OR ae.huisnummertoevoeging = ci.huisnummertoevoeging)
-      LEFT JOIN energy_label_enrichment el
-        ON el."verblijfsobjectId" = LPAD(REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', ''), 16, '0')
-      LEFT JOIN woz_address_enrichment woz
-        ON woz."verblijfsobjectId" = ae.object_id
+        AND (ci.huisnummertoevoeging IS NULL OR ae.huisnummertoevoeging = ci.huisnummertoevoeging)`);
+    }
+    if (needsEl) {
+      joins.push(`LEFT JOIN energy_label_enrichment el
+        ON el."verblijfsobjectId" = LPAD(REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', ''), 16, '0')`);
+    }
+    if (needsWoz) {
+      joins.push(`LEFT JOIN woz_address_enrichment woz
+        ON woz."verblijfsobjectId" = ae.object_id`);
+    }
+
+    const enrichmentQuery = `
+      SELECT ${selectColumns.join(', ')}
+      FROM csv_input ci
+      ${joins.join('\n      ')}
       ORDER BY ci.row_num
     `;
 
@@ -1210,8 +1247,23 @@ async function processEnrichment(
     // Phase 3: Assemble output CSV and upload (90-100%)
     console.log(`Enrichment ${jobId}: Phase 3 - Assembling CSV`);
 
-    const enrichmentHeaders = ENRICHMENT_COLUMNS.map(c => c.header);
+    const enrichmentHeaders = activeColumns.map(c => c.header);
     const outputHeaders = [...allHeaders, ...enrichmentHeaders];
+
+    // Helper to get the value for an enrichment column from a result row
+    function getEnrichmentValue(enrichment: Record<string, any>, key: string): string {
+      if (key === 'gebruiksdoel') {
+        return Array.isArray(enrichment.gebruiksdoel)
+          ? enrichment.gebruiksdoel.join(', ')
+          : enrichment.gebruiksdoel || '';
+      }
+      if (key === 'woz_peildatum') {
+        return enrichment.woz_peildatum
+          ? new Date(enrichment.woz_peildatum).toISOString().split('T')[0]
+          : '';
+      }
+      return String(enrichment[key] ?? '');
+    }
 
     const csvLines: string[] = [];
     // Header row
@@ -1224,37 +1276,16 @@ async function processEnrichment(
       if (!enrichments || enrichments.length === 0) {
         // No match: original columns + empty enrichment columns
         const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
-          .concat(ENRICHMENT_COLUMNS.map(() => ''))
+          .concat(activeColumns.map(() => ''))
           .join(delimiter);
         csvLines.push(line);
       } else {
         // One or more matches: emit a row per match
         for (const enrichment of enrichments) {
-          const gebruiksdoel = Array.isArray(enrichment.gebruiksdoel)
-            ? enrichment.gebruiksdoel.join(', ')
-            : enrichment.gebruiksdoel || '';
-          const wozPeildatum = enrichment.woz_peildatum
-            ? new Date(enrichment.woz_peildatum).toISOString().split('T')[0]
-            : '';
-
-          const enrichmentValues = [
-            enrichment.oppervlakte ?? '',
-            enrichment.oorspronkelijkBouwjaar ?? '',
-            gebruiksdoel,
-            enrichment.energieklasse ?? '',
-            enrichment.woz_waarde ?? '',
-            wozPeildatum,
-            enrichment.latitude ?? '',
-            enrichment.longitude ?? '',
-            enrichment.rd_x ?? '',
-            enrichment.rd_y ?? '',
-            enrichment.object_id ?? '',
-            enrichment.straat ?? '',
-            enrichment.woonplaats ?? '',
-          ];
+          const enrichmentValues = activeColumns.map(col => getEnrichmentValue(enrichment, col.key));
 
           const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
-            .concat(enrichmentValues.map(v => escapeCSVField(String(v))))
+            .concat(enrichmentValues.map(v => escapeCSVField(v)))
             .join(delimiter);
           csvLines.push(line);
         }
