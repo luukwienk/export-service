@@ -947,7 +947,17 @@ const ENRICHMENT_COLUMNS = [
   { key: 'woonplaats', header: 'Woonplaats (BAG)' },
 ];
 
-app.post('/api/addresses/enrich', authenticate, upload.single('file'), async (req: express.Request, res: express.Response) => {
+app.post('/api/addresses/enrich', authenticate, (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  upload.single('file')(req, res, (err: any) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'Bestand is te groot. Maximum is 50 MB.' });
+      }
+      return res.status(400).json({ error: err.message || 'Fout bij uploaden van bestand' });
+    }
+    next();
+  });
+}, async (req: express.Request, res: express.Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No CSV file uploaded. Send as multipart form-data with field name "file".' });
