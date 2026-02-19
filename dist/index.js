@@ -14,6 +14,8 @@ const blob_1 = require("@vercel/blob");
 const zod_1 = require("zod");
 const stream_1 = require("stream");
 const jszip_1 = __importDefault(require("jszip"));
+const multer_1 = __importDefault(require("multer"));
+const sync_1 = require("csv-parse/sync");
 // Load environment variables
 dotenv_1.default.config();
 // Initialize Express app
@@ -58,6 +60,42 @@ const authenticate = (req, res, next) => {
     }
     next();
 };
+// Multer setup for CSV file uploads
+const upload = (0, multer_1.default)({
+    storage: multer_1.default.memoryStorage(),
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+    fileFilter: (_req, file, cb) => {
+        if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+            cb(null, true);
+        }
+        else {
+            cb(new Error('Only CSV files are allowed'));
+        }
+    }
+});
+function detectColumns(headers) {
+    const mapping = {
+        postcode: null,
+        huisnummer: null,
+        huisletter: null,
+        huisnummertoevoeging: null,
+    };
+    const patterns = {
+        postcode: /^(postcode|postal_?code|zip_?code|zip|pc|pcode)$/i,
+        huisnummer: /^(huisnummer|house_?number|huisnr|nr|number|huis_?nr)$/i,
+        huisletter: /^(huisletter|house_?letter|letter)$/i,
+        huisnummertoevoeging: /^(huisnummertoevoeging|toevoeging|addition|house_?number_?addition|suffix|huis_?nr_?toev)$/i,
+    };
+    for (const header of headers) {
+        const trimmed = header.trim();
+        for (const [key, pattern] of Object.entries(patterns)) {
+            if (pattern.test(trimmed) && !mapping[key]) {
+                mapping[key] = trimmed;
+            }
+        }
+    }
+    return mapping;
+}
 // Define the ExportQuerySchema
 const ExportQuerySchema = zod_1.z.object({
     search: zod_1.z.string().optional(),
@@ -96,9 +134,9 @@ function buildWhereClause(filters) {
     const gebruiksdoel = typeof filters.gebruiksdoel === 'string' ? filters.gebruiksdoel.trim() : undefined;
     if (search) {
         conditions.push(`(
-      straat ILIKE $${paramIndex} OR
-      woonplaats ILIKE $${paramIndex + 1} OR
-      postcode ILIKE $${paramIndex + 2}
+      ae.straat ILIKE $${paramIndex} OR
+      ae.woonplaats ILIKE $${paramIndex + 1} OR
+      ae.postcode ILIKE $${paramIndex + 2}
     )`);
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
         paramIndex += 3;
@@ -107,7 +145,7 @@ function buildWhereClause(filters) {
         // Use exact matching with cleaned postcode - consistent with frontend
         const cleanPostcode = filters.postcode.replace(/\s+/g, '').toUpperCase();
         if (cleanPostcode) {
-            conditions.push(`postcode = $${paramIndex}`);
+            conditions.push(`ae.postcode = $${paramIndex}`);
             params.push(cleanPostcode);
             paramIndex++;
         }
@@ -118,59 +156,59 @@ function buildWhereClause(filters) {
     const rangeFrom = typeof rangeFromRaw === 'string' ? rangeFromRaw.replace(/\s+/g, '').toUpperCase() : undefined;
     const rangeTo = typeof rangeToRaw === 'string' ? rangeToRaw.replace(/\s+/g, '').toUpperCase() : undefined;
     if (rangeFrom && rangeTo) {
-        conditions.push(`postcode >= $${paramIndex} AND postcode <= $${paramIndex + 1}`);
+        conditions.push(`ae.postcode >= $${paramIndex} AND ae.postcode <= $${paramIndex + 1}`);
         params.push(rangeFrom, rangeTo);
         paramIndex += 2;
     }
     if (straat) {
         // Exact matching to align with frontend behavior
-        conditions.push(`straat = $${paramIndex}`);
+        conditions.push(`ae.straat = $${paramIndex}`);
         params.push(straat);
         paramIndex++;
     }
     if (woonplaats) {
         // Exact matching to align with frontend behavior
-        conditions.push(`woonplaats = $${paramIndex}`);
+        conditions.push(`ae.woonplaats = $${paramIndex}`);
         params.push(woonplaats);
         paramIndex++;
     }
     if (filters.huisnummer) {
-        conditions.push(`huisnummer = $${paramIndex}`);
+        conditions.push(`ae.huisnummer = $${paramIndex}`);
         params.push(filters.huisnummer);
         paramIndex++;
     }
     if (filters.isOppervlakteActive && filters.minOppervlakte !== undefined) {
-        conditions.push(`oppervlakte >= $${paramIndex}`);
+        conditions.push(`ae.oppervlakte >= $${paramIndex}`);
         params.push(filters.minOppervlakte);
         paramIndex++;
     }
     if (filters.isOppervlakteActive && filters.maxOppervlakte !== undefined) {
-        conditions.push(`oppervlakte <= $${paramIndex}`);
+        conditions.push(`ae.oppervlakte <= $${paramIndex}`);
         params.push(filters.maxOppervlakte);
         paramIndex++;
     }
     if (gebruiksdoel) {
-        conditions.push(`$${paramIndex} = ANY(gebruiksdoel)`);
+        conditions.push(`$${paramIndex} = ANY(ae.gebruiksdoel)`);
         params.push(gebruiksdoel);
         paramIndex++;
     }
     if (filters.minBouwjaar !== undefined) {
-        conditions.push(`"oorspronkelijkBouwjaar" >= $${paramIndex}`);
+        conditions.push(`ae."oorspronkelijkBouwjaar" >= $${paramIndex}`);
         params.push(filters.minBouwjaar);
         paramIndex++;
     }
     if (filters.maxBouwjaar !== undefined) {
-        conditions.push(`"oorspronkelijkBouwjaar" <= $${paramIndex}`);
+        conditions.push(`ae."oorspronkelijkBouwjaar" <= $${paramIndex}`);
         params.push(filters.maxBouwjaar);
         paramIndex++;
     }
     if (adres_status) {
-        conditions.push(`adres_status = $${paramIndex}`);
+        conditions.push(`ae.adres_status = $${paramIndex}`);
         params.push(adres_status);
         paramIndex++;
     }
     if (filters.is_bruikbaar !== undefined) {
-        conditions.push(`is_bruikbaar = $${paramIndex}`);
+        conditions.push(`ae.is_bruikbaar = $${paramIndex}`);
         params.push(filters.is_bruikbaar);
         paramIndex++;
     }
@@ -231,7 +269,7 @@ app.post('/api/addresses/export', authenticate, async (req, res) => {
         // Count records to be exported
         const client = await exportPool.connect();
         try {
-            let countQuery = 'SELECT COUNT(*) as count FROM address_export';
+            let countQuery = 'SELECT COUNT(*) as count FROM address_export ae';
             if (whereClause) {
                 countQuery += ` WHERE ${whereClause}`;
             }
@@ -440,157 +478,172 @@ async function processExport(jobId) {
         client.release();
     }
 }
-async function processCSVExport(job, whereClause, params, nextParamIndex, client, filename) {
-    // Define columns
-    const columns = [
-        { key: 'postcode', header: 'Postcode' },
-        { key: 'huisnummer', header: 'Huisnummer' },
-        { key: 'huisletter', header: 'Huisletter' },
-        { key: 'huisnummertoevoeging', header: 'huisnummertoevoeging' },
-        // Include a separate combined column (letter+toevoeging)
-        { key: 'huisnummer_toevoeging_gecombineerd', header: 'huisnummertoevoeging_gecombineerd' },
-        { key: 'straat', header: 'Straat' },
-        { key: 'woonplaats', header: 'Woonplaats' },
-        { key: 'oppervlakte', header: 'Oppervlakte' },
-        { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
-        { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
-        { key: 'latitude', header: 'Latitude' },
-        { key: 'longitude', header: 'Longitude' },
-        { key: 'rd_x', header: 'RD X' },
-        { key: 'rd_y', header: 'RD Y' },
-        { key: 'is_ligplaats', header: 'Is Ligplaats' },
-        { key: 'is_standplaats', header: 'Is Standplaats' },
-        { key: 'is_verblijfsobject', header: 'Is Verblijfsobject' },
-        { key: 'status', header: 'Status' }
-    ];
-    // Create a CSV buffer to hold all data
-    let csvContent = columns.map(col => col.header).join(',') + '\n';
-    // Process in batches with OFFSET pagination
-    const batchSize = job.filters.batchSize || 200000;
-    const chunkSize = 20000; // Process in smaller chunks for memory efficiency
-    let offset = 0;
-    let hasMoreRecords = true;
-    let totalProcessed = 0;
-    while (hasMoreRecords) {
-        // Check if job was cancelled
-        const jobStatusResult = await client.query('SELECT status FROM export_jobs WHERE id = $1', [job.id]);
-        if (jobStatusResult.rows[0]?.status === 'cancelled') {
-            console.log(`Export job ${job.id} was cancelled, stopping processing`);
-            break;
+const EXPORT_COLUMNS = [
+    { key: 'postcode', header: 'Postcode' },
+    { key: 'huisnummer', header: 'Huisnummer' },
+    { key: 'huisletter', header: 'Huisletter' },
+    { key: 'huisnummertoevoeging', header: 'Nummer Toevoeging' },
+    { key: 'huisnummer_toevoeging_gecombineerd', header: 'Huisnummertoevoeging' },
+    { key: 'straat', header: 'Straat' },
+    { key: 'woonplaats', header: 'Woonplaats' },
+    { key: 'oppervlakte', header: 'Oppervlakte' },
+    { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
+    { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
+    { key: 'energieklasse', header: 'Energielabel' },
+    { key: 'woz_waarde', header: 'WOZ Waarde' },
+    { key: 'woz_peildatum', header: 'WOZ Peildatum' },
+    { key: 'latitude', header: 'Latitude' },
+    { key: 'longitude', header: 'Longitude' },
+    { key: 'rd_x', header: 'RD X' },
+    { key: 'rd_y', header: 'RD Y' },
+    { key: 'is_ligplaats', header: 'Is Ligplaats' },
+    { key: 'is_standplaats', header: 'Is Standplaats' },
+    { key: 'is_verblijfsobject', header: 'Is Verblijfsobject' },
+    { key: 'status', header: 'Status' }
+];
+function processAddress(address) {
+    let huisnummer_toevoeging_gecombineerd = null;
+    if (address.huisletter || address.huisnummertoevoeging) {
+        const letter = address.huisletter?.trim() || '';
+        const additionRaw = address.huisnummertoevoeging?.trim() || '';
+        const addition = additionRaw.replace(/\s+/g, '');
+        if (letter && addition) {
+            huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
+                ? `${letter}${addition}`
+                : `${letter}-${addition}`;
         }
-        // Build and execute query with OFFSET
-        let query = `
-      SELECT 
-        "postcode",
-        "huisnummer",
-        "huisletter",
-        "huisnummertoevoeging",
-        "straat",
-        "woonplaats",
-        "oppervlakte",
-        "gebruiksdoel",
-        "oorspronkelijkBouwjaar",
-        "latitude",
-        "longitude",
-        "rd_x",
-        "rd_y",
-        "is_ligplaats",
-        "is_standplaats",
-        "is_verblijfsobject",
-        "adres_status" AS "status"
-      FROM address_export
-      ${whereClause ? `WHERE ${whereClause}` : ''}
-      ORDER BY "postcode", "huisnummer", 
-               COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
-      LIMIT ${batchSize} OFFSET ${offset}
-    `;
-        const addressesResult = await client.query(query, params);
-        const addresses = addressesResult.rows;
-        console.log(`Batch query returned ${addresses.length} addresses`);
-        if (addresses.length === 0 || addresses.length < batchSize) {
-            hasMoreRecords = false;
+        else if (letter) {
+            huisnummer_toevoeging_gecombineerd = letter;
         }
-        if (addresses.length > 0) {
-            // Process in smaller chunks to avoid memory issues
-            for (let i = 0; i < addresses.length; i += chunkSize) {
-                const chunk = addresses.slice(i, i + chunkSize);
-                // Process the gebruiksdoel array to a comma-separated string and add combined field
-                const processedAddresses = chunk.map((address) => {
-                    // Combine huisletter and huisnummertoevoeging
-                    let huisnummer_toevoeging_gecombineerd = null;
-                    if (address.huisletter || address.huisnummertoevoeging) {
-                        const letter = address.huisletter?.trim() || '';
-                        const additionRaw = address.huisnummertoevoeging?.trim() || '';
-                        const addition = additionRaw.replace(/\s+/g, '');
-                        if (letter && addition) {
-                            // If the addition starts with a digit (e.g. '100', '2a'), do not add a hyphen
-                            // to avoid double dashes when external systems join with huisnummer.
-                            huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
-                                ? `${letter}${addition}`
-                                : `${letter}-${addition}`;
-                        }
-                        else if (letter) {
-                            huisnummer_toevoeging_gecombineerd = letter;
-                        }
-                        else if (addition) {
-                            huisnummer_toevoeging_gecombineerd = addition;
-                        }
-                    }
-                    return {
-                        ...address,
-                        gebruiksdoel: Array.isArray(address.gebruiksdoel)
-                            ? address.gebruiksdoel.join(', ')
-                            : address.gebruiksdoel,
-                        huisnummer_toevoeging_gecombineerd
-                    };
-                });
-                // Convert to CSV rows and add to content
-                for (const address of processedAddresses) {
-                    const row = columns.map(col => {
-                        const value = address[col.key];
-                        // Properly escape and quote CSV values
-                        if (value === null || value === undefined)
-                            return '';
-                        if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
-                            return `"${value.replace(/"/g, '""')}"`;
-                        }
-                        return value;
-                    }).join(',');
-                    csvContent += row + '\n';
-                }
-                // Update counters
-                totalProcessed += chunk.length;
-                // Calculate percentage complete
-                const percentComplete = Math.round((totalProcessed / job.count) * 100);
-                // Only update database every 5% progress to reduce updates
-                if (percentComplete % 5 === 0 || i + chunkSize >= addresses.length) {
-                    await client.query(`UPDATE export_jobs 
-             SET "processedCount" = $1, 
-                 "percentComplete" = $2 
-             WHERE id = $3 AND "percentComplete" < $2`, [totalProcessed, percentComplete, job.id]);
-                    console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
-                }
-            }
-            // Update offset for next batch
-            offset += addresses.length;
+        else if (addition) {
+            huisnummer_toevoeging_gecombineerd = addition;
         }
     }
-    console.log(`CSV generation complete. Total size: ${csvContent.length} bytes`);
-    // Convert content to readable stream with UTF-8 BOM for proper Excel encoding
-    const BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
-    const contentBuffer = Buffer.from(csvContent, 'utf-8');
-    const bufferWithBOM = Buffer.concat([BOM, contentBuffer]);
-    const readableStream = stream_1.Readable.from(bufferWithBOM);
-    // Upload to Vercel Blob Storage
+    // Format WOZ peildatum as YYYY-MM-DD
+    const woz_peildatum = address.woz_peildatum
+        ? new Date(address.woz_peildatum).toISOString().split('T')[0]
+        : null;
+    return {
+        ...address,
+        gebruiksdoel: Array.isArray(address.gebruiksdoel)
+            ? address.gebruiksdoel.join(', ')
+            : address.gebruiksdoel,
+        huisnummer_toevoeging_gecombineerd,
+        woz_peildatum
+    };
+}
+function addressToCSVRow(address) {
+    return EXPORT_COLUMNS.map(col => {
+        const value = address[col.key];
+        if (value === null || value === undefined)
+            return '';
+        if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+            return `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+    }).join(',');
+}
+function buildCursorQuery(whereClause) {
+    return `
+    SELECT
+      ae."postcode",
+      ae."huisnummer",
+      ae."huisletter",
+      ae."huisnummertoevoeging",
+      ae."straat",
+      ae."woonplaats",
+      ae."oppervlakte",
+      ae."gebruiksdoel",
+      ae."oorspronkelijkBouwjaar",
+      ae."latitude",
+      ae."longitude",
+      ae."rd_x",
+      ae."rd_y",
+      ae."is_ligplaats",
+      ae."is_standplaats",
+      ae."is_verblijfsobject",
+      ae."adres_status" AS "status",
+      el."energieKlasse" AS "energieklasse",
+      woz."wozWaarde" AS "woz_waarde",
+      woz."wozPeildatum" AS "woz_peildatum"
+    FROM address_export ae
+    LEFT JOIN energy_label_enrichment el
+      ON el."verblijfsobjectId" = LPAD(REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', ''), 16, '0')
+    LEFT JOIN woz_address_enrichment woz
+      ON woz."verblijfsobjectId" = ae.object_id
+    ${whereClause ? `WHERE ${whereClause}` : ''}
+    ORDER BY ae."postcode", ae."huisnummer",
+             COALESCE(ae."huisletter", ''), COALESCE(ae."huisnummertoevoeging", '')
+  `;
+}
+async function processCSVExport(job, whereClause, params, nextParamIndex, client, filename) {
+    const CURSOR_BATCH = 5000;
+    const CANCEL_CHECK_INTERVAL = 50000;
+    // Use a separate connection for progress updates and cancellation checks
+    // so they are visible outside the cursor transaction.
+    const progressClient = await exportPool.connect();
+    const chunks = [];
+    // Header row
+    chunks.push(Buffer.from(EXPORT_COLUMNS.map(col => col.header).join(',') + '\n', 'utf-8'));
+    // Use a server-side cursor for sequential scan (no OFFSET degradation)
+    await client.query('BEGIN');
     try {
+        const cursorQuery = buildCursorQuery(whereClause);
+        await client.query(`DECLARE export_cursor CURSOR FOR ${cursorQuery}`, params);
+        let totalProcessed = 0;
+        let lastPercentReported = -1;
+        let cancelled = false;
+        while (true) {
+            const result = await client.query(`FETCH ${CURSOR_BATCH} FROM export_cursor`);
+            const rows = result.rows;
+            if (rows.length === 0)
+                break;
+            // Convert batch to CSV lines and collect as Buffer
+            const lines = [];
+            for (const row of rows) {
+                const processed = processAddress(row);
+                lines.push(addressToCSVRow(processed));
+            }
+            chunks.push(Buffer.from(lines.join('\n') + '\n', 'utf-8'));
+            totalProcessed += rows.length;
+            // Progress update every 5% — via separate connection so it's immediately visible
+            const percentComplete = Math.round((totalProcessed / job.count) * 100);
+            if (percentComplete !== lastPercentReported && percentComplete % 5 === 0) {
+                lastPercentReported = percentComplete;
+                await progressClient.query(`UPDATE export_jobs
+           SET "processedCount" = $1,
+               "percentComplete" = $2
+           WHERE id = $3 AND "percentComplete" < $2`, [totalProcessed, percentComplete, job.id]);
+                console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+            }
+            // Cancellation check every 50K rows — via separate connection
+            if (totalProcessed % CANCEL_CHECK_INTERVAL < CURSOR_BATCH) {
+                const jobStatusResult = await progressClient.query('SELECT status FROM export_jobs WHERE id = $1', [job.id]);
+                if (jobStatusResult.rows[0]?.status === 'cancelled') {
+                    console.log(`Export job ${job.id} was cancelled, stopping processing`);
+                    cancelled = true;
+                    break;
+                }
+            }
+        }
+        await client.query('CLOSE export_cursor');
+        await client.query('COMMIT');
+        if (cancelled)
+            return;
+        // Assemble final buffer with BOM
+        const BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
+        const totalSize = BOM.length + chunks.reduce((sum, c) => sum + c.length, 0);
+        const bufferWithBOM = Buffer.concat([BOM, ...chunks], totalSize);
+        console.log(`CSV generation complete. Total size: ${bufferWithBOM.length} bytes`);
+        const readableStream = stream_1.Readable.from(bufferWithBOM);
+        // Upload to Vercel Blob Storage
         console.log(`Uploading CSV to Vercel Blob Storage as ${filename}`);
         const blob = await (0, blob_1.put)(filename, readableStream, {
             contentType: 'text/csv; charset=utf-8',
             access: 'public',
         });
         console.log(`Upload successful. URL: ${blob.url}`);
-        // Update job to completed
-        await client.query(`UPDATE export_jobs 
+        await progressClient.query(`UPDATE export_jobs
        SET status = 'completed',
            "processedCount" = $1,
            "percentComplete" = 100,
@@ -599,171 +652,85 @@ async function processCSVExport(job, whereClause, params, nextParamIndex, client
        WHERE id = $3`, [totalProcessed, blob.url, job.id]);
     }
     catch (error) {
-        console.error('Error uploading to Vercel Blob Storage:', error);
+        await client.query('ROLLBACK');
         throw error;
+    }
+    finally {
+        progressClient.release();
     }
 }
 async function processZIPExport(job, whereClause, params, nextParamIndex, client, filename) {
-    // Create a new JSZip instance
     const zip = new jszip_1.default();
-    // Define columns
-    const columns = [
-        { key: 'postcode', header: 'Postcode' },
-        { key: 'huisnummer', header: 'Huisnummer' },
-        { key: 'huisletter', header: 'Huisletter' },
-        { key: 'huisnummertoevoeging', header: 'huisnummertoevoeging' },
-        { key: 'huisnummer_toevoeging_gecombineerd', header: 'huisnummertoevoeging_gecombineerd' },
-        { key: 'straat', header: 'Straat' },
-        { key: 'woonplaats', header: 'Woonplaats' },
-        { key: 'oppervlakte', header: 'Oppervlakte' },
-        { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
-        { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
-        { key: 'latitude', header: 'Latitude' },
-        { key: 'longitude', header: 'Longitude' },
-        { key: 'rd_x', header: 'RD X' },
-        { key: 'rd_y', header: 'RD Y' },
-        { key: 'is_ligplaats', header: 'Is Ligplaats' },
-        { key: 'is_standplaats', header: 'Is Standplaats' },
-        { key: 'is_verblijfsobject', header: 'Is Verblijfsobject' },
-        { key: 'status', header: 'Status' }
-    ];
-    // Create a CSV file inside the ZIP
-    let csvContent = columns.map(col => col.header).join(',') + '\n';
-    // Process in batches with OFFSET pagination
-    const batchSize = job.filters.batchSize || 100000;
-    const chunkSize = 10000; // Process in smaller chunks for memory efficiency
-    let offset = 0;
-    let hasMoreRecords = true;
-    let totalProcessed = 0;
-    while (hasMoreRecords) {
-        // Check if job was cancelled
-        const jobStatusResult = await client.query('SELECT status FROM export_jobs WHERE id = $1', [job.id]);
-        if (jobStatusResult.rows[0]?.status === 'cancelled') {
-            console.log(`Export job ${job.id} was cancelled, stopping processing`);
-            break;
-        }
-        // Build and execute query with OFFSET
-        let query = `
-      SELECT 
-        "postcode",
-        "huisnummer",
-        "huisletter",
-        "huisnummertoevoeging",
-        "straat",
-        "woonplaats",
-        "oppervlakte",
-        "gebruiksdoel",
-        "oorspronkelijkBouwjaar",
-        "latitude",
-        "longitude",
-        "rd_x",
-        "rd_y",
-        "is_ligplaats",
-        "is_standplaats",
-        "is_verblijfsobject",
-        "adres_status" AS "status"
-      FROM address_export
-      ${whereClause ? `WHERE ${whereClause}` : ''}
-      ORDER BY "postcode", "huisnummer", 
-               COALESCE("huisletter", ''), COALESCE("huisnummertoevoeging", '')
-      LIMIT ${batchSize} OFFSET ${offset}
-    `;
-        const addressesResult = await client.query(query, params);
-        const addresses = addressesResult.rows;
-        if (addresses.length === 0 || addresses.length < batchSize) {
-            hasMoreRecords = false;
-        }
-        if (addresses.length > 0) {
-            // Process in smaller chunks to avoid memory issues
-            for (let i = 0; i < addresses.length; i += chunkSize) {
-                const chunk = addresses.slice(i, i + chunkSize);
-                // Process the gebruiksdoel array to a comma-separated string and add combined field
-                const processedAddresses = chunk.map((address) => {
-                    // Combine huisletter and huisnummertoevoeging
-                    let huisnummer_toevoeging_gecombineerd = null;
-                    if (address.huisletter || address.huisnummertoevoeging) {
-                        const letter = address.huisletter?.trim() || '';
-                        const additionRaw = address.huisnummertoevoeging?.trim() || '';
-                        const addition = additionRaw.replace(/\s+/g, '');
-                        if (letter && addition) {
-                            huisnummer_toevoeging_gecombineerd = /^\d/.test(addition)
-                                ? `${letter}${addition}`
-                                : `${letter}-${addition}`;
-                        }
-                        else if (letter) {
-                            huisnummer_toevoeging_gecombineerd = letter;
-                        }
-                        else if (addition) {
-                            huisnummer_toevoeging_gecombineerd = addition;
-                        }
-                    }
-                    return {
-                        ...address,
-                        gebruiksdoel: Array.isArray(address.gebruiksdoel)
-                            ? address.gebruiksdoel.join(', ')
-                            : address.gebruiksdoel,
-                        huisnummer_toevoeging_gecombineerd
-                    };
-                });
-                // Convert to CSV rows and add to content
-                for (const address of processedAddresses) {
-                    const row = columns.map(col => {
-                        const value = address[col.key];
-                        // Properly escape and quote CSV values
-                        if (value === null || value === undefined)
-                            return '';
-                        if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
-                            return `"${value.replace(/"/g, '""')}"`;
-                        }
-                        return value;
-                    }).join(',');
-                    csvContent += row + '\n';
-                }
-                // Update counters
-                totalProcessed += chunk.length;
-                // Calculate percentage complete
-                const percentComplete = Math.round((totalProcessed / job.count) * 100);
-                // Only update database every 5% progress to reduce updates
-                if (percentComplete % 5 === 0 || i + chunkSize >= addresses.length) {
-                    await client.query(`UPDATE export_jobs 
-             SET "processedCount" = $1, 
-                 "percentComplete" = $2 
-             WHERE id = $3 AND "percentComplete" < $2`, [totalProcessed, percentComplete, job.id]);
-                    console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+    const CURSOR_BATCH = 5000;
+    const CANCEL_CHECK_INTERVAL = 50000;
+    const progressClient = await exportPool.connect();
+    const chunks = [];
+    chunks.push(Buffer.from(EXPORT_COLUMNS.map(col => col.header).join(',') + '\n', 'utf-8'));
+    await client.query('BEGIN');
+    try {
+        const cursorQuery = buildCursorQuery(whereClause);
+        await client.query(`DECLARE export_cursor CURSOR FOR ${cursorQuery}`, params);
+        let totalProcessed = 0;
+        let lastPercentReported = -1;
+        let cancelled = false;
+        while (true) {
+            const result = await client.query(`FETCH ${CURSOR_BATCH} FROM export_cursor`);
+            const rows = result.rows;
+            if (rows.length === 0)
+                break;
+            const lines = [];
+            for (const row of rows) {
+                const processed = processAddress(row);
+                lines.push(addressToCSVRow(processed));
+            }
+            chunks.push(Buffer.from(lines.join('\n') + '\n', 'utf-8'));
+            totalProcessed += rows.length;
+            const percentComplete = Math.round((totalProcessed / job.count) * 100);
+            if (percentComplete !== lastPercentReported && percentComplete % 5 === 0) {
+                lastPercentReported = percentComplete;
+                await progressClient.query(`UPDATE export_jobs
+           SET "processedCount" = $1,
+               "percentComplete" = $2
+           WHERE id = $3 AND "percentComplete" < $2`, [totalProcessed, percentComplete, job.id]);
+                console.log(`Export ${job.id}: ${percentComplete}% complete (${totalProcessed}/${job.count})`);
+            }
+            if (totalProcessed % CANCEL_CHECK_INTERVAL < CURSOR_BATCH) {
+                const jobStatusResult = await progressClient.query('SELECT status FROM export_jobs WHERE id = $1', [job.id]);
+                if (jobStatusResult.rows[0]?.status === 'cancelled') {
+                    console.log(`Export job ${job.id} was cancelled, stopping processing`);
+                    cancelled = true;
+                    break;
                 }
             }
-            // Update offset for next batch
-            offset += addresses.length;
         }
-    }
-    // Add CSV file to the ZIP
-    const csvFilename = filename.replace('.zip', '.csv');
-    zip.file(csvFilename, csvContent);
-    // Add a README file to the ZIP
-    const readmeContent = `Export Details
+        await client.query('CLOSE export_cursor');
+        await client.query('COMMIT');
+        if (cancelled)
+            return;
+        // Assemble CSV content as a single Buffer for ZIP
+        const csvBuffer = Buffer.concat(chunks);
+        console.log(`CSV generation complete. Total size: ${csvBuffer.length} bytes`);
+        const csvFilename = filename.replace('.zip', '.csv');
+        zip.file(csvFilename, csvBuffer);
+        const readmeContent = `Export Details
 Date: ${new Date().toISOString()}
 Total Records: ${totalProcessed}
 Filters: ${JSON.stringify(job.filters, null, 2)}
-  
+
 This file contains address data exported from ContactBuddy.nl.
 `;
-    zip.file('README.txt', readmeContent);
-    // Generate ZIP file
-    console.log('Generating ZIP file...');
-    const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
-    console.log(`ZIP generation complete. Total size: ${zipContent.length} bytes`);
-    // Convert content to readable stream
-    const readableStream = stream_1.Readable.from(zipContent);
-    // Upload to Vercel Blob Storage
-    try {
+        zip.file('README.txt', readmeContent);
+        console.log('Generating ZIP file...');
+        const zipContent = await zip.generateAsync({ type: 'nodebuffer' });
+        console.log(`ZIP generation complete. Total size: ${zipContent.length} bytes`);
+        const readableStream = stream_1.Readable.from(zipContent);
         console.log(`Uploading ZIP to Vercel Blob Storage as ${filename}`);
         const blob = await (0, blob_1.put)(filename, readableStream, {
             contentType: 'application/zip',
             access: 'public',
         });
         console.log(`Upload successful. URL: ${blob.url}`);
-        // Update job to completed
-        await client.query(`UPDATE export_jobs 
+        await progressClient.query(`UPDATE export_jobs
        SET status = 'completed',
            "processedCount" = $1,
            "percentComplete" = 100,
@@ -772,9 +739,327 @@ This file contains address data exported from ContactBuddy.nl.
        WHERE id = $3`, [totalProcessed, blob.url, job.id]);
     }
     catch (error) {
-        console.error('Error uploading to Vercel Blob Storage:', error);
+        await client.query('ROLLBACK');
         throw error;
     }
+    finally {
+        progressClient.release();
+    }
+}
+// ============================================================
+// CSV Enrichment endpoint
+// ============================================================
+const MAX_ENRICHMENT_ROWS = 100000;
+const ENRICHMENT_COLUMNS = [
+    { key: 'oppervlakte', header: 'Oppervlakte' },
+    { key: 'oorspronkelijkBouwjaar', header: 'Bouwjaar' },
+    { key: 'gebruiksdoel', header: 'Gebruiksdoel' },
+    { key: 'energieklasse', header: 'Energielabel' },
+    { key: 'woz_waarde', header: 'WOZ Waarde' },
+    { key: 'woz_peildatum', header: 'WOZ Peildatum' },
+    { key: 'latitude', header: 'Latitude' },
+    { key: 'longitude', header: 'Longitude' },
+    { key: 'rd_x', header: 'RD X' },
+    { key: 'rd_y', header: 'RD Y' },
+    { key: 'object_id', header: 'Object ID' },
+    { key: 'straat', header: 'Straat (BAG)' },
+    { key: 'woonplaats', header: 'Woonplaats (BAG)' },
+];
+app.post('/api/addresses/enrich', authenticate, upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No CSV file uploaded. Send as multipart form-data with field name "file".' });
+        }
+        // Strip BOM if present and parse CSV
+        let csvContent = req.file.buffer.toString('utf-8');
+        if (csvContent.charCodeAt(0) === 0xFEFF) {
+            csvContent = csvContent.slice(1);
+        }
+        let records;
+        try {
+            records = (0, sync_1.parse)(csvContent, {
+                columns: true,
+                skip_empty_lines: true,
+                trim: true,
+                bom: true,
+                relax_column_count: true,
+            });
+        }
+        catch (parseError) {
+            return res.status(400).json({
+                error: 'Failed to parse CSV file',
+                details: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+            });
+        }
+        if (records.length === 0) {
+            return res.status(400).json({ error: 'CSV file is empty (no data rows)' });
+        }
+        if (records.length > MAX_ENRICHMENT_ROWS) {
+            return res.status(400).json({
+                error: `CSV has ${records.length.toLocaleString()} rows. Maximum is ${MAX_ENRICHMENT_ROWS.toLocaleString()}.`
+            });
+        }
+        // Detect columns
+        const allHeaders = Object.keys(records[0]);
+        const columnMapping = detectColumns(allHeaders);
+        if (!columnMapping.postcode || !columnMapping.huisnummer) {
+            return res.status(400).json({
+                error: 'Could not detect required columns: postcode and huisnummer',
+                detectedHeaders: allHeaders,
+                columnMapping,
+                hint: 'Ensure your CSV has columns named "postcode" and "huisnummer" (or common variations like "postal_code", "house_number")'
+            });
+        }
+        // Create job
+        const jobId = (0, cuid2_1.createId)();
+        const job = await prisma.exportJob.create({
+            data: {
+                id: jobId,
+                status: 'pending',
+                format: 'csv',
+                count: records.length,
+                filters: { type: 'enrichment', columnMapping, allHeaders },
+                createdAt: new Date(),
+            }
+        });
+        // Fire and forget
+        processEnrichment(job.id, records, allHeaders, columnMapping).catch(error => {
+            console.error('Error in enrichment processing:', error);
+            prisma.exportJob.update({
+                where: { id: job.id },
+                data: {
+                    status: 'failed',
+                    error: error instanceof Error ? error.message : 'Unknown error processing enrichment',
+                    completedAt: new Date()
+                }
+            }).catch(updateError => {
+                console.error('Error updating job status after enrichment error:', updateError);
+            });
+        });
+        return res.status(200).json({
+            jobId: job.id,
+            status: 'pending',
+            rowCount: records.length,
+            columnsDetected: columnMapping,
+            message: `Enrichment of ${records.length} rows started. Check status at /api/addresses/export/status?jobId=${job.id}`
+        });
+    }
+    catch (error) {
+        console.error('Error creating enrichment job:', error);
+        return res.status(500).json({
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+});
+async function processEnrichment(jobId, records, allHeaders, columnMapping) {
+    const startTime = Date.now();
+    const client = await exportPool.connect();
+    const progressClient = await exportPool.connect();
+    try {
+        // Update status to processing
+        await progressClient.query(`UPDATE export_jobs
+       SET status = 'processing',
+           "startedAt" = NOW(),
+           "processedCount" = 0,
+           "percentComplete" = 0
+       WHERE id = $1`, [jobId]);
+        // Phase 1: Load CSV rows into temp table (0-30%)
+        console.log(`Enrichment ${jobId}: Phase 1 - Loading ${records.length} rows into temp table`);
+        await client.query('BEGIN');
+        await client.query(`
+      CREATE TEMP TABLE csv_input (
+        row_num INT,
+        postcode TEXT,
+        huisnummer INT,
+        huisletter TEXT,
+        huisnummertoevoeging TEXT
+      ) ON COMMIT DROP
+    `);
+        // Batch insert rows into temp table
+        const BATCH_SIZE = 1000;
+        for (let i = 0; i < records.length; i += BATCH_SIZE) {
+            const batch = records.slice(i, i + BATCH_SIZE);
+            const values = [];
+            const params = [];
+            let paramIdx = 1;
+            for (let j = 0; j < batch.length; j++) {
+                const row = batch[j];
+                const rowNum = i + j;
+                const postcode = (row[columnMapping.postcode] || '').replace(/\s+/g, '').toUpperCase();
+                const huisnummerRaw = row[columnMapping.huisnummer] || '';
+                const huisnummer = parseInt(huisnummerRaw, 10);
+                if (!postcode || isNaN(huisnummer))
+                    continue; // skip rows with missing key fields
+                const huisletter = columnMapping.huisletter ? (row[columnMapping.huisletter] || '').trim() || null : null;
+                const toevoeging = columnMapping.huisnummertoevoeging ? (row[columnMapping.huisnummertoevoeging] || '').trim() || null : null;
+                values.push(`($${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3}, $${paramIdx + 4})`);
+                params.push(rowNum, postcode, huisnummer, huisletter, toevoeging);
+                paramIdx += 5;
+            }
+            if (values.length > 0) {
+                await client.query(`INSERT INTO csv_input (row_num, postcode, huisnummer, huisletter, huisnummertoevoeging) VALUES ${values.join(', ')}`, params);
+            }
+            // Progress update for phase 1 (0-30%)
+            const phase1Percent = Math.round(((i + batch.length) / records.length) * 30);
+            await progressClient.query(`UPDATE export_jobs SET "percentComplete" = $1 WHERE id = $2 AND "percentComplete" < $1`, [phase1Percent, jobId]);
+        }
+        await client.query('CREATE INDEX ON csv_input (postcode, huisnummer)');
+        console.log(`Enrichment ${jobId}: Phase 1 complete`);
+        // Phase 2: Enrich via JOIN (30-90%)
+        console.log(`Enrichment ${jobId}: Phase 2 - Enrichment query`);
+        const enrichmentQuery = `
+      SELECT ci.row_num,
+        ae."oppervlakte", ae."gebruiksdoel", ae."oorspronkelijkBouwjaar",
+        ae."latitude", ae."longitude", ae."rd_x", ae."rd_y",
+        ae."object_id", ae."straat", ae."woonplaats",
+        el."energieKlasse" AS "energieklasse",
+        woz."wozWaarde" AS "woz_waarde",
+        woz."wozPeildatum" AS "woz_peildatum"
+      FROM csv_input ci
+      LEFT JOIN address_export ae
+        ON ae.postcode = ci.postcode AND ae.huisnummer = ci.huisnummer
+        AND (ci.huisletter IS NULL OR ae.huisletter = ci.huisletter)
+        AND (ci.huisnummertoevoeging IS NULL OR ae.huisnummertoevoeging = ci.huisnummertoevoeging)
+      LEFT JOIN energy_label_enrichment el
+        ON el."verblijfsobjectId" = LPAD(REPLACE(ae.object_id, 'NL.IMBAG.Verblijfsobject.', ''), 16, '0')
+      LEFT JOIN woz_address_enrichment woz
+        ON woz."verblijfsobjectId" = ae.object_id
+      ORDER BY ci.row_num
+    `;
+        await client.query(`DECLARE enrich_cursor CURSOR FOR ${enrichmentQuery}`);
+        // Build enrichment lookup: rowNum -> enrichment data (may have multiple matches)
+        const enrichmentMap = new Map();
+        const CURSOR_BATCH = 5000;
+        let fetched = 0;
+        while (true) {
+            const result = await client.query(`FETCH ${CURSOR_BATCH} FROM enrich_cursor`);
+            if (result.rows.length === 0)
+                break;
+            for (const row of result.rows) {
+                const rowNum = row.row_num;
+                if (!enrichmentMap.has(rowNum)) {
+                    enrichmentMap.set(rowNum, []);
+                }
+                enrichmentMap.get(rowNum).push(row);
+            }
+            fetched += result.rows.length;
+            // Progress for phase 2 (30-90%)
+            // We don't know the total enrichment rows upfront, so estimate based on input count
+            const phase2Percent = Math.min(90, 30 + Math.round((fetched / Math.max(records.length, 1)) * 60));
+            await progressClient.query(`UPDATE export_jobs SET "percentComplete" = $1 WHERE id = $2 AND "percentComplete" < $1`, [phase2Percent, jobId]);
+            // Cancellation check
+            if (fetched % 50000 < CURSOR_BATCH) {
+                const statusResult = await progressClient.query('SELECT status FROM export_jobs WHERE id = $1', [jobId]);
+                if (statusResult.rows[0]?.status === 'cancelled') {
+                    console.log(`Enrichment ${jobId} cancelled`);
+                    await client.query('CLOSE enrich_cursor');
+                    await client.query('COMMIT');
+                    return;
+                }
+            }
+        }
+        await client.query('CLOSE enrich_cursor');
+        await client.query('COMMIT');
+        console.log(`Enrichment ${jobId}: Phase 2 complete. ${enrichmentMap.size} rows matched, ${fetched} total result rows`);
+        // Phase 3: Assemble output CSV and upload (90-100%)
+        console.log(`Enrichment ${jobId}: Phase 3 - Assembling CSV`);
+        const enrichmentHeaders = ENRICHMENT_COLUMNS.map(c => c.header);
+        const outputHeaders = [...allHeaders, ...enrichmentHeaders];
+        const csvLines = [];
+        // Header row
+        csvLines.push(outputHeaders.map(h => escapeCSVField(h)).join(','));
+        for (let i = 0; i < records.length; i++) {
+            const originalRow = records[i];
+            const enrichments = enrichmentMap.get(i);
+            if (!enrichments || enrichments.length === 0) {
+                // No match: original columns + empty enrichment columns
+                const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
+                    .concat(ENRICHMENT_COLUMNS.map(() => ''))
+                    .join(',');
+                csvLines.push(line);
+            }
+            else {
+                // One or more matches: emit a row per match
+                for (const enrichment of enrichments) {
+                    const gebruiksdoel = Array.isArray(enrichment.gebruiksdoel)
+                        ? enrichment.gebruiksdoel.join(', ')
+                        : enrichment.gebruiksdoel || '';
+                    const wozPeildatum = enrichment.woz_peildatum
+                        ? new Date(enrichment.woz_peildatum).toISOString().split('T')[0]
+                        : '';
+                    const enrichmentValues = [
+                        enrichment.oppervlakte ?? '',
+                        enrichment.oorspronkelijkBouwjaar ?? '',
+                        gebruiksdoel,
+                        enrichment.energieklasse ?? '',
+                        enrichment.woz_waarde ?? '',
+                        wozPeildatum,
+                        enrichment.latitude ?? '',
+                        enrichment.longitude ?? '',
+                        enrichment.rd_x ?? '',
+                        enrichment.rd_y ?? '',
+                        enrichment.object_id ?? '',
+                        enrichment.straat ?? '',
+                        enrichment.woonplaats ?? '',
+                    ];
+                    const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
+                        .concat(enrichmentValues.map(v => escapeCSVField(String(v))))
+                        .join(',');
+                    csvLines.push(line);
+                }
+            }
+        }
+        const BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
+        const csvBuffer = Buffer.concat([BOM, Buffer.from(csvLines.join('\n') + '\n', 'utf-8')]);
+        console.log(`Enrichment ${jobId}: CSV assembled (${csvBuffer.length} bytes). Uploading...`);
+        await progressClient.query(`UPDATE export_jobs SET "percentComplete" = 95 WHERE id = $1`, [jobId]);
+        const date = new Date().toISOString().split('T')[0];
+        const filename = `enriched_${date}_${records.length}rows.csv`;
+        const blob = await (0, blob_1.put)(filename, stream_1.Readable.from(csvBuffer), {
+            contentType: 'text/csv; charset=utf-8',
+            access: 'public',
+        });
+        console.log(`Enrichment ${jobId}: Upload complete. URL: ${blob.url}`);
+        const totalTime = Date.now() - startTime;
+        const outputRowCount = csvLines.length - 1; // minus header
+        await progressClient.query(`UPDATE export_jobs
+       SET status = 'completed',
+           "processedCount" = $1,
+           "percentComplete" = 100,
+           "completedAt" = NOW(),
+           "blobUrl" = $2
+       WHERE id = $3`, [outputRowCount, blob.url, jobId]);
+        console.log(`Enrichment ${jobId} completed successfully\n` +
+            `- Total time: ${(totalTime / 1000).toFixed(1)}s\n` +
+            `- Input rows: ${records.length}\n` +
+            `- Output rows: ${outputRowCount}\n` +
+            `- Matched rows: ${enrichmentMap.size}`);
+    }
+    catch (error) {
+        try {
+            await client.query('ROLLBACK');
+        }
+        catch (_) { /* ignore rollback error */ }
+        await progressClient.query(`UPDATE export_jobs
+       SET status = 'failed',
+           error = $1,
+           "completedAt" = NOW()
+       WHERE id = $2`, [error instanceof Error ? error.message : 'Unknown error', jobId]);
+        throw error;
+    }
+    finally {
+        client.release();
+        progressClient.release();
+    }
+}
+function escapeCSVField(value) {
+    if (value === '' || value === null || value === undefined)
+        return '';
+    const str = String(value);
+    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
 }
 // Health check endpoint
 app.get('/health', async (req, res) => {
