@@ -959,10 +959,17 @@ app.post('/api/addresses/enrich', authenticate, upload.single('file'), async (re
       csvContent = csvContent.slice(1);
     }
 
+    // Auto-detect delimiter from first line
+    const firstLine = csvContent.split(/\r?\n/)[0] || '';
+    const semicolonCount = (firstLine.match(/;/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    const delimiter = semicolonCount > commaCount ? ';' : ',';
+
     let records: Record<string, string>[];
     try {
       records = parse(csvContent, {
         columns: true,
+        delimiter,
         skip_empty_lines: true,
         trim: true,
         bom: true,
@@ -1012,7 +1019,7 @@ app.post('/api/addresses/enrich', authenticate, upload.single('file'), async (re
     });
 
     // Fire and forget
-    processEnrichment(job.id, records, allHeaders, columnMapping).catch(error => {
+    processEnrichment(job.id, records, allHeaders, columnMapping, delimiter).catch(error => {
       console.error('Error in enrichment processing:', error);
       prisma.exportJob.update({
         where: { id: job.id },
@@ -1045,7 +1052,8 @@ async function processEnrichment(
   jobId: string,
   records: Record<string, string>[],
   allHeaders: string[],
-  columnMapping: ColumnMapping
+  columnMapping: ColumnMapping,
+  delimiter: string = ','
 ): Promise<void> {
   const startTime = Date.now();
   const client = await exportPool.connect();
@@ -1197,7 +1205,7 @@ async function processEnrichment(
 
     const csvLines: string[] = [];
     // Header row
-    csvLines.push(outputHeaders.map(h => escapeCSVField(h)).join(','));
+    csvLines.push(outputHeaders.map(h => escapeCSVField(h)).join(delimiter));
 
     for (let i = 0; i < records.length; i++) {
       const originalRow = records[i];
@@ -1207,7 +1215,7 @@ async function processEnrichment(
         // No match: original columns + empty enrichment columns
         const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
           .concat(ENRICHMENT_COLUMNS.map(() => ''))
-          .join(',');
+          .join(delimiter);
         csvLines.push(line);
       } else {
         // One or more matches: emit a row per match
@@ -1237,7 +1245,7 @@ async function processEnrichment(
 
           const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
             .concat(enrichmentValues.map(v => escapeCSVField(String(v))))
-            .join(',');
+            .join(delimiter);
           csvLines.push(line);
         }
       }
