@@ -1179,8 +1179,8 @@ async function processEnrichment(
     if (needsAe || needsEl || needsWoz) {
       joins.push(`LEFT JOIN address_export ae
         ON ae.postcode = ci.postcode AND ae.huisnummer = ci.huisnummer
-        AND (ci.huisletter IS NULL OR ae.huisletter = ci.huisletter)
-        AND (ci.huisnummertoevoeging IS NULL OR ae.huisnummertoevoeging = ci.huisnummertoevoeging)`);
+        AND COALESCE(ae.huisletter, '') = COALESCE(ci.huisletter, '')
+        AND COALESCE(ae.huisnummertoevoeging, '') = COALESCE(ci.huisnummertoevoeging, '')`);
     }
     if (needsEl) {
       joins.push(`LEFT JOIN energy_label_enrichment el
@@ -1267,7 +1267,7 @@ async function processEnrichment(
 
     const csvLines: string[] = [];
     // Header row
-    csvLines.push(outputHeaders.map(h => escapeCSVField(h)).join(delimiter));
+    csvLines.push(outputHeaders.map(h => escapeCSVField(h, delimiter)).join(delimiter));
 
     for (let i = 0; i < records.length; i++) {
       const originalRow = records[i];
@@ -1275,7 +1275,7 @@ async function processEnrichment(
 
       if (!enrichments || enrichments.length === 0) {
         // No match: original columns + empty enrichment columns
-        const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
+        const line = allHeaders.map(h => escapeCSVField(originalRow[h] || '', delimiter))
           .concat(activeColumns.map(() => ''))
           .join(delimiter);
         csvLines.push(line);
@@ -1284,8 +1284,8 @@ async function processEnrichment(
         for (const enrichment of enrichments) {
           const enrichmentValues = activeColumns.map(col => getEnrichmentValue(enrichment, col.key));
 
-          const line = allHeaders.map(h => escapeCSVField(originalRow[h] || ''))
-            .concat(enrichmentValues.map(v => escapeCSVField(v)))
+          const line = allHeaders.map(h => escapeCSVField(originalRow[h] || '', delimiter))
+            .concat(enrichmentValues.map(v => escapeCSVField(v, delimiter)))
             .join(delimiter);
           csvLines.push(line);
         }
@@ -1352,10 +1352,10 @@ async function processEnrichment(
   }
 }
 
-function escapeCSVField(value: string): string {
+function escapeCSVField(value: string, delimiter: string = ','): string {
   if (value === '' || value === null || value === undefined) return '';
   const str = String(value);
-  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+  if (str.includes(delimiter) || str.includes('"') || str.includes('\n') || str.includes('\r')) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
