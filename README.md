@@ -1,15 +1,19 @@
 # Address Export Server
 
-A dedicated server for high-performance exports from your address database. This server maintains persistent database connections to eliminate the connection overhead in serverless environments, dramatically improving export performance.
+A dedicated server for high-performance exports and CSV enrichment from your address database. This server maintains persistent database connections to eliminate the connection overhead in serverless environments, dramatically improving export performance.
 
 ## Features
 
-- **High Performance**: Maintains persistent database connections
-- **Streaming**: Uses streaming to minimize memory usage
-- **Progress Tracking**: Provides real-time progress updates
-- **API Compatibility**: Matches your existing API endpoints
-- **Scalable**: Can handle millions of addresses efficiently
-- **Vercel Blob Integration**: Uses Vercel Blob for storing export files
+- **High Performance**: Maintains persistent database connections with connection pooling
+- **Streaming**: Uses PostgreSQL server-side cursors to minimize memory usage
+- **Progress Tracking**: Provides real-time progress updates for all async jobs
+- **CSV Enrichment**: Upload a CSV of addresses and enrich it with BAG, energy label, WOZ, coordinate, and address data
+- **Auto-Detection**: Automatically detects CSV columns and delimiters (comma or semicolon)
+- **Category Filtering**: Choose which enrichment categories to include (bag, coordinaten, energielabel, woz, adres)
+- **Energy Label & WOZ Data**: Exports include energy labels and WOZ property valuations
+- **Scalable**: Can handle up to 1,000,000 addresses per export and 100,000 rows per enrichment
+- **Vercel Blob Integration**: Uses Vercel Blob for storing export and enrichment files
+- **Cancellation Support**: Running jobs can be cancelled at any time
 
 ## Setup
 
@@ -47,6 +51,7 @@ A dedicated server for high-performance exports from your address database. This
    - `DATABASE_URL`: Your Neon PostgreSQL connection string
    - `API_KEY`: A secret key for API authentication
    - `BLOB_READ_WRITE_TOKEN`: Your Vercel Blob storage token
+   - `PORT`: Server port (default: `3001`)
 
 5. Generate Prisma client:
    ```
@@ -106,16 +111,30 @@ Body:
 {
   "search": "optional search term",
   "postcode": "optional postcode",
+  "postcodeRange": {
+    "from": "1000AA",
+    "to": "1999ZZ"
+  },
   "woonplaats": "optional city",
+  "straat": "optional street",
+  "huisnummer": 42,
   "minOppervlakte": 50,
   "maxOppervlakte": 150,
+  "isOppervlakteActive": true,
   "gebruiksdoel": "optional purpose",
   "minBouwjaar": 1980,
   "maxBouwjaar": 2022,
+  "is_bruikbaar": true,
+  "adres_status": "optional status",
+  "begindatum": "optional start date",
+  "einddatum": "optional end date",
+  "object_id": "optional object ID",
   "format": "csv",
-  "batchSize": 50000
+  "batchSize": 200000
 }
 ```
+
+All filter fields are optional. The `format` defaults to `csv` (also supports `zip`). The `batchSize` ranges from 1,000 to 200,000 (default: 200,000). A maximum of 1,000,000 records can be exported per job.
 
 Response:
 ```json
@@ -126,11 +145,41 @@ Response:
 }
 ```
 
+#### Export CSV Columns
+
+Exported files include the following columns:
+
+| Column | Description |
+|---|---|
+| Postcode | Postal code |
+| Huisnummer | House number |
+| Huisletter | House letter |
+| Nummer Toevoeging | House number addition |
+| Huisnummertoevoeging | Combined letter + addition |
+| Straat | Street name |
+| Woonplaats | City |
+| Oppervlakte | Surface area (m²) |
+| Gebruiksdoel | Usage purpose |
+| Bouwjaar | Construction year |
+| Energielabel | Energy label class |
+| WOZ Waarde | WOZ property value |
+| WOZ Peildatum | WOZ valuation date |
+| Latitude | GPS latitude |
+| Longitude | GPS longitude |
+| RD X | Rijksdriehoek X coordinate |
+| RD Y | Rijksdriehoek Y coordinate |
+| Is Ligplaats | Is houseboat berth |
+| Is Standplaats | Is mobile home pitch |
+| Is Verblijfsobject | Is dwelling |
+| Status | Address status |
+
 ### Check Export Status
 
 ```
 GET /api/addresses/export/status?jobId=<job-id>
 ```
+
+This endpoint is used for both export and enrichment jobs.
 
 Response:
 ```json
@@ -177,6 +226,67 @@ Response:
 }
 ```
 
+### CSV Enrichment
+
+Upload a CSV file containing address data and enrich it with additional information from the database.
+
+```
+POST /api/addresses/enrich
+```
+
+Headers:
+- `Authorization: Bearer <your-api-key>`
+- `Content-Type: multipart/form-data`
+
+Form data fields:
+- `file` (required): CSV file to enrich (max 50 MB)
+- `categories` (optional): JSON array of enrichment categories to include
+
+**CSV requirements:**
+- Must contain at least `postcode` and `huisnummer` columns
+- Columns are auto-detected by name (supports common variations like `postal_code`, `house_number`, `zip`, `nr`, etc.)
+- Delimiter is auto-detected (comma or semicolon)
+- Maximum 100,000 rows
+
+**Enrichment categories** (default: all):
+- `bag` — Oppervlakte, Bouwjaar, Gebruiksdoel, Object ID
+- `coordinaten` — Latitude, Longitude, RD X, RD Y
+- `energielabel` — Energielabel
+- `woz` — WOZ Waarde, WOZ Peildatum
+- `adres` — Straat (BAG), Woonplaats (BAG)
+
+Example with curl:
+```bash
+# Enrich with all categories
+curl -X POST https://your-server/api/addresses/enrich \
+  -H "Authorization: Bearer your-api-key" \
+  -F "file=@addresses.csv"
+
+# Enrich with specific categories only
+curl -X POST https://your-server/api/addresses/enrich \
+  -H "Authorization: Bearer your-api-key" \
+  -F "file=@addresses.csv" \
+  -F 'categories=["bag", "energielabel"]'
+```
+
+Response:
+```json
+{
+  "jobId": "clhj5r2y0000008l01234abcd",
+  "status": "pending",
+  "rowCount": 5000,
+  "columnsDetected": {
+    "postcode": "Postcode",
+    "huisnummer": "Huisnummer",
+    "huisletter": "Huisletter",
+    "huisnummertoevoeging": null
+  },
+  "message": "Enrichment of 5000 rows started. Check status at /api/addresses/export/status?jobId=clhj5r2y0000008l01234abcd"
+}
+```
+
+The enrichment result is a CSV containing all original columns plus the enrichment columns for the selected categories. Track progress using the same `/api/addresses/export/status` endpoint.
+
 ### Health Check
 
 ```
@@ -201,16 +311,19 @@ To integrate with your existing frontend:
 
 ## Performance Considerations
 
-- **Connection Pooling**: The server maintains a pool of database connections for optimal performance
+- **Connection Pooling**: The server maintains a pool of 10 database connections for optimal performance
+- **Server-Side Cursors**: Data is fetched using PostgreSQL cursors in batches of 5,000 rows, avoiding OFFSET degradation
+- **Separate Progress Connection**: Progress updates use a dedicated connection so they are visible immediately outside the cursor transaction
 - **Batch Processing**: Data is fetched and processed in batches to manage memory usage
-- **Progress Tracking**: The server tracks export progress and provides percentage complete
-- **Memory Management**: Data is streamed to Vercel Blob without loading everything into memory
+- **Cancellation Checks**: Running jobs check for cancellation every 50,000 rows
 
 ## Troubleshooting
 
 - **Database Connection Issues**: Check your DATABASE_URL and ensure your Neon database allows connections from your server's IP
-- **Slow Exports**: Consider increasing the batchSize parameter (up to 100,000)
+- **Slow Exports**: Consider increasing the batchSize parameter (up to 200,000)
 - **Memory Problems**: Decrease the batchSize parameter if you encounter memory issues
+- **File Too Large**: The enrichment endpoint accepts CSV files up to 50 MB. Reduce the file size or split it into multiple uploads
+- **Row Limit Exceeded**: Enrichment supports up to 100,000 rows per upload. Split larger files into batches
 
 ## Maintenance
 
@@ -220,6 +333,7 @@ To integrate with your existing frontend:
 
 ## Security
 
-- **API Authentication**: All export endpoints require API key authentication
-- **Database Security**: The server uses secure connections to your Neon database
-- **Input Validation**: All input parameters are validated before processing
+- **API Authentication**: All export and enrichment endpoints require Bearer token authentication
+- **Database Security**: The server uses secure SSL connections to your Neon database
+- **Input Validation**: All input parameters are validated with Zod schemas before processing
+- **File Validation**: Only CSV files are accepted for enrichment, with size limits enforced
