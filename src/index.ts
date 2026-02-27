@@ -135,6 +135,7 @@ const ExportQuerySchema = z.object({
   begindatum: z.string().optional(),
   einddatum: z.string().optional(),
   object_id: z.string().optional(),
+  energielabel: z.string().optional(),
   format: z.enum(['csv', 'zip']).default('csv'),
   batchSize: z.coerce.number().int().min(1000).max(200000).default(200000),
 });
@@ -242,6 +243,16 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
   if (filters.is_bruikbaar !== undefined) {
     conditions.push(`ae.is_bruikbaar = $${paramIndex}`);
     params.push(filters.is_bruikbaar);
+    paramIndex++;
+  }
+
+  if (filters.energielabel) {
+    conditions.push(`EXISTS (
+      SELECT 1 FROM energy_label_enrichment el
+      WHERE el."verblijfsobjectId" = LPAD(SPLIT_PART(ae.object_id, '.', 4), 16, '0')
+      AND el."energieKlasse" = $${paramIndex}
+    )`);
+    params.push(filters.energielabel);
     paramIndex++;
   }
 
