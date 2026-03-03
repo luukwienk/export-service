@@ -1214,10 +1214,25 @@ async function processEnrichment(
     // Build JOINs dynamically
     const joins: string[] = [];
     if (needsAe || needsEl || needsWoz) {
+      // Flexible matching: when the CSV has a value in huisnummertoevoeging but not huisletter,
+      // also try matching it as huisletter (common in user CSVs where a single column holds both)
       joins.push(`LEFT JOIN address_export ae
         ON ae.postcode = ci.postcode AND ae.huisnummer = ci.huisnummer
-        AND COALESCE(ae.huisletter, '') = COALESCE(ci.huisletter, '')
-        AND COALESCE(ae.huisnummertoevoeging, '') = COALESCE(ci.huisnummertoevoeging, '')`);
+        AND (
+          -- Exact match on both fields
+          (COALESCE(ae.huisletter, '') = COALESCE(ci.huisletter, '')
+           AND COALESCE(ae.huisnummertoevoeging, '') = COALESCE(ci.huisnummertoevoeging, ''))
+          OR
+          -- CSV has toevoeging but no huisletter: try matching toevoeging as huisletter
+          (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+           AND ae.huisletter = ci.huisnummertoevoeging AND COALESCE(ae.huisnummertoevoeging, '') = '')
+          OR
+          -- CSV has toevoeging but no huisletter: try matching as combined (letter in ae.huisletter, rest in ae.huisnummertoevoeging)
+          (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+           AND LENGTH(ci.huisnummertoevoeging) > 1
+           AND ae.huisletter = LEFT(ci.huisnummertoevoeging, 1)
+           AND ae.huisnummertoevoeging = SUBSTRING(ci.huisnummertoevoeging FROM 2))
+        )`);
     }
     if (needsEl) {
       joins.push(`LEFT JOIN energy_label_enrichment el
