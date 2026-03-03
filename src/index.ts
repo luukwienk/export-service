@@ -1029,9 +1029,35 @@ app.post('/api/addresses/enrich', authenticate, (req: express.Request, res: expr
       } catch {}
     }
 
-    // Detect columns
+    // Detect columns (or use client-provided mapping)
     const allHeaders = Object.keys(records[0]);
-    const columnMapping = detectColumns(allHeaders);
+    let columnMapping: ColumnMapping;
+
+    const columnMappingParam = req.body?.columnMapping || (req as any).body?.columnMapping;
+    if (typeof columnMappingParam === 'string') {
+      try {
+        const parsed = JSON.parse(columnMappingParam);
+        // Validate: values must be existing headers or null
+        const validFields: (keyof ColumnMapping)[] = ['postcode', 'huisnummer', 'huisletter', 'huisnummertoevoeging'];
+        columnMapping = { postcode: null, huisnummer: null, huisletter: null, huisnummertoevoeging: null };
+        for (const field of validFields) {
+          const value = parsed[field];
+          if (value && typeof value === 'string') {
+            if (!allHeaders.includes(value)) {
+              return res.status(400).json({
+                error: `Column mapping error: "${value}" for field "${field}" is not a valid CSV header`,
+                detectedHeaders: allHeaders,
+              });
+            }
+            columnMapping[field] = value;
+          }
+        }
+      } catch {
+        return res.status(400).json({ error: 'Invalid columnMapping JSON' });
+      }
+    } else {
+      columnMapping = detectColumns(allHeaders);
+    }
 
     if (!columnMapping.postcode || !columnMapping.huisnummer) {
       return res.status(400).json({
