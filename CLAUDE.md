@@ -64,10 +64,37 @@ No test framework is configured. There are no tests.
 
 ## Deployment
 
-- Docker via `Dockerfile.dockerfile` + `docker-compose.yml`
-- Port 3001 (configurable via `PORT` env var)
-- Target: DigitalOcean Droplet or App Platform
-- `dist/` (compiled JS) is currently tracked in git
+- **Host**: DigitalOcean Droplet `188.166.95.45` (hostname: `contact-buddy-export-server`)
+- **Path on droplet**: `/opt/export-service` (git clone of `github.com/luukwienk/export-service`)
+- **Docker**: `docker-compose.yml` + `Dockerfile.dockerfile` (docker-compose v1 on droplet)
+- **Port**: 3001 (mapped via docker-compose)
+- **SSH**: `ssh root@188.166.95.45` (VPS key authorized; Windows key `contactbuddy-export-service`)
+- **Env**: `.env` on droplet (DATABASE_URL, API_KEY, BLOB_READ_WRITE_TOKEN)
+
+### Deploy procedure
+
+```bash
+# 1. Push local changes to GitHub
+cd ~/projects/export-service
+git push origin main
+
+# 2. SSH into droplet, pull, rebuild, restart
+ssh root@188.166.95.45
+cd /opt/export-service
+git pull origin main
+
+# 3. Rebuild and restart (stop+rm needed due to docker-compose v1 bug)
+docker-compose stop export-server
+docker-compose rm -f export-server
+docker-compose build --no-cache
+docker-compose up -d
+
+# 4. Verify
+curl -s http://localhost:3001/health
+docker-compose ps
+```
+
+**Note**: `docker-compose up -d` alone may fail with `KeyError: 'ContainerConfig'` — this is a known bug in docker-compose v1.29.2 with newer Docker engines. Always stop+rm first.
 
 ## When making changes
 
