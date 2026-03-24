@@ -1215,24 +1215,48 @@ async function processEnrichment(
     const joins: string[] = [];
     if (needsAe || needsEl || needsWoz) {
       // Flexible matching: when the CSV has a value in huisnummertoevoeging but not huisletter,
-      // also try matching it as huisletter (common in user CSVs where a single column holds both)
-      joins.push(`LEFT JOIN address_export ae
-        ON ae.postcode = ci.postcode AND ae.huisnummer = ci.huisnummer
-        AND (
-          -- Exact match on both fields
-          (COALESCE(ae.huisletter, '') = COALESCE(ci.huisletter, '')
-           AND COALESCE(ae.huisnummertoevoeging, '') = COALESCE(ci.huisnummertoevoeging, ''))
-          OR
-          -- CSV has toevoeging but no huisletter: try matching toevoeging as huisletter
-          (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
-           AND ae.huisletter = ci.huisnummertoevoeging AND COALESCE(ae.huisnummertoevoeging, '') = '')
-          OR
-          -- CSV has toevoeging but no huisletter: try matching as combined (letter in ae.huisletter, rest in ae.huisnummertoevoeging)
-          (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
-           AND LENGTH(ci.huisnummertoevoeging) > 1
-           AND ae.huisletter = LEFT(ci.huisnummertoevoeging, 1)
-           AND ae.huisnummertoevoeging = SUBSTRING(ci.huisnummertoevoeging FROM 2))
-        )`);
+      // also try matching it as huisletter (common in user CSVs where a single column holds both).
+      // All comparisons are case-insensitive (LOWER) because BAG uses mixed case (e.g. "1eV")
+      // while CSV inputs often use uppercase ("1EV").
+      // Uses a ranked subquery to pick the best single BAG match per input row, preventing
+      // duplicate output rows when multiple BAG records share the same postcode+huisnummer.
+      joins.push(`LEFT JOIN LATERAL (
+        SELECT ae_inner.*,
+          CASE
+            WHEN LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
+             AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, ''))
+            THEN 1
+            WHEN ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LOWER(ae_inner.huisletter) = LOWER(ci.huisnummertoevoeging)
+             AND COALESCE(ae_inner.huisnummertoevoeging, '') = ''
+            THEN 2
+            WHEN ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LENGTH(ci.huisnummertoevoeging) > 1
+             AND LOWER(ae_inner.huisletter) = LOWER(LEFT(ci.huisnummertoevoeging, 1))
+             AND LOWER(ae_inner.huisnummertoevoeging) = LOWER(SUBSTRING(ci.huisnummertoevoeging FROM 2))
+            THEN 3
+          END AS match_rank
+        FROM address_export ae_inner
+        WHERE ae_inner.postcode = ci.postcode AND ae_inner.huisnummer = ci.huisnummer
+          AND (
+            -- Exact match on both fields (case-insensitive)
+            (LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
+             AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, '')))
+            OR
+            -- CSV has toevoeging but no huisletter: try matching toevoeging as huisletter
+            (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LOWER(ae_inner.huisletter) = LOWER(ci.huisnummertoevoeging)
+             AND COALESCE(ae_inner.huisnummertoevoeging, '') = '')
+            OR
+            -- CSV has toevoeging but no huisletter: try matching as combined
+            (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LENGTH(ci.huisnummertoevoeging) > 1
+             AND LOWER(ae_inner.huisletter) = LOWER(LEFT(ci.huisnummertoevoeging, 1))
+             AND LOWER(ae_inner.huisnummertoevoeging) = LOWER(SUBSTRING(ci.huisnummertoevoeging FROM 2)))
+          )
+        ORDER BY match_rank, (ae_inner.object_id IS NOT NULL) DESC
+        LIMIT 1
+      ) ae ON true`);
     }
     if (needsEl) {
       joins.push(`LEFT JOIN energy_label_enrichment el
