@@ -118,6 +118,8 @@ const ExportQuerySchema = zod_1.z.object({
     begindatum: zod_1.z.string().optional(),
     einddatum: zod_1.z.string().optional(),
     object_id: zod_1.z.string().optional(),
+    energielabel: zod_1.z.string().optional(),
+    excludeWithoutPostcode: zod_1.z.boolean().optional(),
     format: zod_1.z.enum(['csv', 'zip']).default('csv'),
     batchSize: zod_1.z.coerce.number().int().min(1000).max(200000).default(200000),
 });
@@ -210,6 +212,18 @@ function buildWhereClause(filters) {
     if (filters.is_bruikbaar !== undefined) {
         conditions.push(`ae.is_bruikbaar = $${paramIndex}`);
         params.push(filters.is_bruikbaar);
+        paramIndex++;
+    }
+    if (filters.excludeWithoutPostcode) {
+        conditions.push(`ae.postcode IS NOT NULL AND ae.postcode != ''`);
+    }
+    if (filters.energielabel) {
+        conditions.push(`EXISTS (
+      SELECT 1 FROM energy_label_enrichment el
+      WHERE el."verblijfsobjectId" = LPAD(SPLIT_PART(ae.object_id, '.', 4), 16, '0')
+      AND el."energieKlasse" = $${paramIndex}
+    )`);
+        params.push(filters.energielabel);
         paramIndex++;
     }
     return {
@@ -828,9 +842,36 @@ app.post('/api/addresses/enrich', authenticate, (req, res, next) => {
             }
             catch { }
         }
-        // Detect columns
+        // Detect columns (or use client-provided mapping)
         const allHeaders = Object.keys(records[0]);
-        const columnMapping = detectColumns(allHeaders);
+        let columnMapping;
+        const columnMappingParam = req.body?.columnMapping || req.body?.columnMapping;
+        if (typeof columnMappingParam === 'string') {
+            try {
+                const parsed = JSON.parse(columnMappingParam);
+                // Validate: values must be existing headers or null
+                const validFields = ['postcode', 'huisnummer', 'huisletter', 'huisnummertoevoeging'];
+                columnMapping = { postcode: null, huisnummer: null, huisletter: null, huisnummertoevoeging: null };
+                for (const field of validFields) {
+                    const value = parsed[field];
+                    if (value && typeof value === 'string') {
+                        if (!allHeaders.includes(value)) {
+                            return res.status(400).json({
+                                error: `Column mapping error: "${value}" for field "${field}" is not a valid CSV header`,
+                                detectedHeaders: allHeaders,
+                            });
+                        }
+                        columnMapping[field] = value;
+                    }
+                }
+            }
+            catch {
+                return res.status(400).json({ error: 'Invalid columnMapping JSON' });
+            }
+        }
+        else {
+            columnMapping = detectColumns(allHeaders);
+        }
         if (!columnMapping.postcode || !columnMapping.huisnummer) {
             return res.status(400).json({
                 error: 'Could not detect required columns: postcode and huisnummer',
@@ -958,10 +999,49 @@ async function processEnrichment(jobId, records, allHeaders, columnMapping, deli
         // Build JOINs dynamically
         const joins = [];
         if (needsAe || needsEl || needsWoz) {
-            joins.push(`LEFT JOIN address_export ae
-        ON ae.postcode = ci.postcode AND ae.huisnummer = ci.huisnummer
-        AND COALESCE(ae.huisletter, '') = COALESCE(ci.huisletter, '')
-        AND COALESCE(ae.huisnummertoevoeging, '') = COALESCE(ci.huisnummertoevoeging, '')`);
+            // Flexible matching: when the CSV has a value in huisnummertoevoeging but not huisletter,
+            // also try matching it as huisletter (common in user CSVs where a single column holds both).
+            // All comparisons are case-insensitive (LOWER) because BAG uses mixed case (e.g. "1eV")
+            // while CSV inputs often use uppercase ("1EV").
+            // Uses a ranked subquery to pick the best single BAG match per input row, preventing
+            // duplicate output rows when multiple BAG records share the same postcode+huisnummer.
+            joins.push(`LEFT JOIN LATERAL (
+        SELECT ae_inner.*,
+          CASE
+            WHEN LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
+             AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, ''))
+            THEN 1
+            WHEN ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LOWER(ae_inner.huisletter) = LOWER(ci.huisnummertoevoeging)
+             AND COALESCE(ae_inner.huisnummertoevoeging, '') = ''
+            THEN 2
+            WHEN ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LENGTH(ci.huisnummertoevoeging) > 1
+             AND LOWER(ae_inner.huisletter) = LOWER(LEFT(ci.huisnummertoevoeging, 1))
+             AND LOWER(ae_inner.huisnummertoevoeging) = LOWER(SUBSTRING(ci.huisnummertoevoeging FROM 2))
+            THEN 3
+          END AS match_rank
+        FROM address_export ae_inner
+        WHERE ae_inner.postcode = ci.postcode AND ae_inner.huisnummer = ci.huisnummer
+          AND (
+            -- Exact match on both fields (case-insensitive)
+            (LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
+             AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, '')))
+            OR
+            -- CSV has toevoeging but no huisletter: try matching toevoeging as huisletter
+            (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LOWER(ae_inner.huisletter) = LOWER(ci.huisnummertoevoeging)
+             AND COALESCE(ae_inner.huisnummertoevoeging, '') = '')
+            OR
+            -- CSV has toevoeging but no huisletter: try matching as combined
+            (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
+             AND LENGTH(ci.huisnummertoevoeging) > 1
+             AND LOWER(ae_inner.huisletter) = LOWER(LEFT(ci.huisnummertoevoeging, 1))
+             AND LOWER(ae_inner.huisnummertoevoeging) = LOWER(SUBSTRING(ci.huisnummertoevoeging FROM 2)))
+          )
+        ORDER BY match_rank, (ae_inner.object_id IS NOT NULL) DESC
+        LIMIT 1
+      ) ae ON true`);
         }
         if (needsEl) {
             joins.push(`LEFT JOIN energy_label_enrichment el

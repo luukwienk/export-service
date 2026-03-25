@@ -136,6 +136,7 @@ const ExportQuerySchema = z.object({
   einddatum: z.string().optional(),
   object_id: z.string().optional(),
   energielabel: z.string().optional(),
+  excludeWithoutPostcode: z.boolean().optional(),
   format: z.enum(['csv', 'zip']).default('csv'),
   batchSize: z.coerce.number().int().min(1000).max(200000).default(200000),
 });
@@ -244,6 +245,10 @@ function buildWhereClause(filters: z.infer<typeof ExportQuerySchema>) {
     conditions.push(`ae.is_bruikbaar = $${paramIndex}`);
     params.push(filters.is_bruikbaar);
     paramIndex++;
+  }
+
+  if (filters.excludeWithoutPostcode) {
+    conditions.push(`ae.postcode IS NOT NULL AND ae.postcode != ''`);
   }
 
   if (filters.energielabel) {
