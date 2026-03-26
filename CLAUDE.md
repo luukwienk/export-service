@@ -47,7 +47,7 @@ No test framework is configured. There are no tests.
 
 ## Database
 
-- PostgreSQL hosted on Neon
+- PostgreSQL hosted on DigitalOcean Managed PostgreSQL (was Neon, migrated March 2026)
 - Schema: `prisma/schema.prisma`
 - Key tables/views used in code: `address_export`, `energy_label_enrichment`, `woz_address_enrichment`, `export_jobs`
 - Connection pool: max 10, 30s timeouts, SSL with `rejectUnauthorized: false`

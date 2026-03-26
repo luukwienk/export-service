@@ -20,7 +20,7 @@ A dedicated server for high-performance exports and CSV enrichment from your add
 ### Prerequisites
 
 - Node.js 18+ and npm
-- Access to your Neon PostgreSQL database
+- Access to your PostgreSQL database (DigitalOcean Managed PostgreSQL)
 - Vercel Blob storage account and token
 - Docker and Docker Compose (for containerized deployment)
 
@@ -129,12 +129,14 @@ Body:
   "begindatum": "optional start date",
   "einddatum": "optional end date",
   "object_id": "optional object ID",
+  "energielabel": "optional energy label class (e.g. A, B, C)",
+  "excludeWithoutPostcode": true,
   "format": "csv",
   "batchSize": 200000
 }
 ```
 
-All filter fields are optional. The `format` defaults to `csv` (also supports `zip`). The `batchSize` ranges from 1,000 to 200,000 (default: 200,000). A maximum of 1,000,000 records can be exported per job.
+All filter fields are optional. The `excludeWithoutPostcode` flag (default: `false`) excludes addresses that have no postcode assigned — in the Netherlands, PostNL does not assign postcodes to certain address types such as garages, storage units, and transformer stations (~11,000 addresses). The `format` defaults to `csv` (also supports `zip`). The `batchSize` ranges from 1,000 to 200,000 (default: 200,000). A maximum of 1,000,000 records can be exported per job.
 
 Response:
 ```json
@@ -319,7 +321,7 @@ To integrate with your existing frontend:
 
 ## Troubleshooting
 
-- **Database Connection Issues**: Check your DATABASE_URL and ensure your Neon database allows connections from your server's IP
+- **Database Connection Issues**: Check your DATABASE_URL and ensure your database allows connections from your server's IP
 - **Slow Exports**: Consider increasing the batchSize parameter (up to 200,000)
 - **Memory Problems**: Decrease the batchSize parameter if you encounter memory issues
 - **File Too Large**: The enrichment endpoint accepts CSV files up to 50 MB. Reduce the file size or split it into multiple uploads
@@ -334,6 +336,6 @@ To integrate with your existing frontend:
 ## Security
 
 - **API Authentication**: All export and enrichment endpoints require Bearer token authentication
-- **Database Security**: The server uses secure SSL connections to your Neon database
+- **Database Security**: The server uses secure SSL connections to the database
 - **Input Validation**: All input parameters are validated with Zod schemas before processing
 - **File Validation**: Only CSV files are accepted for enrichment, with size limits enforced
