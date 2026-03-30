@@ -47,7 +47,7 @@ app.use(cors({
     'https://nederland-nine.vercel.app',
     'https://contactbuddy.nl',
     'https://www.contactbuddy.nl',
-    'http://localhost:3000'
+    /^http:\/\/localhost:\d+$/,
   ],
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization']
