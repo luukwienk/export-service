@@ -86,6 +86,81 @@ interface ColumnMapping {
   huisnummertoevoeging: string | null;
 }
 
+// Parsed address components ready for DB insertion
+interface ParsedAddress {
+  postcode: string;
+  huisnummer: number;
+  huisletter: string | null;
+  huisnummertoevoeging: string | null;
+}
+
+/**
+ * Parse and normalize CSV address fields into canonical BAG components.
+ *
+ * Handles all known CSV structures:
+ *   - Fully split columns: huisnummer=8, huisletter=A, toevoeging=1
+ *   - Combined in toevoeging: toevoeging="A 1", "B11", "A", "bis", "II", "1eV"
+ *   - Combined in huisnummer: huisnummer="8A", "8A1", "8 A 1"
+ *   - Plain: huisnummer="8" (no letter/toevoeging)
+ *
+ * Heuristic for parsing an unstructured addition string (no separate huisletter):
+ *   1. Single letter          → huisletter              ("A"   → letter=A, toev=null)
+ *   2. Letter + digits        → huisletter + toevoeging ("B11" → letter=B, toev=11)
+ *   3. Everything else        → toevoeging as-is        ("bis" → letter=null, toev=bis)
+ */
+function parseAddressComponents(
+  postcodeRaw: string,
+  huisnummerRaw: string,
+  huisletterRaw: string | null,
+  toevoegingRaw: string | null,
+): ParsedAddress | null {
+  // --- Postcode ---
+  const postcode = postcodeRaw.replace(/\s+/g, '').toUpperCase();
+  if (!postcode) return null;
+
+  // --- Huisnummer: extract leading digits, keep remainder ---
+  const trimmedNr = huisnummerRaw.trim();
+  const nrMatch = trimmedNr.match(/^(\d+)\s*(.*)$/);
+  if (!nrMatch) return null;
+
+  const huisnummer = parseInt(nrMatch[1], 10);
+  if (isNaN(huisnummer)) return null;
+
+  const huisnummerRemainder = nrMatch[2].replace(/\s+/g, '').trim(); // "A", "A1", etc.
+
+  // --- Start with explicitly mapped columns ---
+  let huisletter: string | null = huisletterRaw?.trim() || null;
+  let toevoeging: string | null = toevoegingRaw?.trim() || null;
+
+  // --- Merge huisnummer remainder when no explicit columns provided ---
+  // If huisnummer was "8A" or "8A1" and neither letter nor toevoeging are mapped,
+  // treat the remainder as an unstructured addition to be parsed below.
+  if (huisnummerRemainder && !huisletter && !toevoeging) {
+    toevoeging = huisnummerRemainder;
+  }
+
+  // --- Parse unstructured toevoeging into letter + toevoeging ---
+  // Only when there's no separate huisletter column provided.
+  if (!huisletter && toevoeging) {
+    const normalized = toevoeging.replace(/\s+/g, ''); // "A 1" → "A1"
+
+    if (/^[a-zA-Z]$/.test(normalized)) {
+      // Single letter: it's a huisletter (e.g. "A", "B")
+      huisletter = normalized;
+      toevoeging = null;
+    } else if (/^[a-zA-Z]\d+$/.test(normalized)) {
+      // Letter followed by digits: split (e.g. "B11" → "B" + "11")
+      huisletter = normalized[0];
+      toevoeging = normalized.slice(1);
+    } else {
+      // Everything else: keep as toevoeging (e.g. "bis", "II", "1eV", "123")
+      toevoeging = normalized;
+    }
+  }
+
+  return { postcode, huisnummer, huisletter, huisnummertoevoeging: toevoeging };
+}
+
 function detectColumns(headers: string[]): ColumnMapping {
   const mapping: ColumnMapping = {
     postcode: null,
@@ -1165,34 +1240,17 @@ async function processEnrichment(
       for (let j = 0; j < batch.length; j++) {
         const row = batch[j];
         const rowNum = i + j;
-        const postcode = (row[columnMapping.postcode!] || '').replace(/\s+/g, '').toUpperCase();
-        const huisnummerRaw = (row[columnMapping.huisnummer!] || '').trim();
-        const huisnummerMatch = huisnummerRaw.match(/^(\d+)\s*(.*)$/);
-        if (!huisnummerMatch) continue;
-        const huisnummer = parseInt(huisnummerMatch[1], 10);
-        const huisnummerRemainder = huisnummerMatch[2].trim(); // e.g. "A", "A1", "B11"
 
-        if (!postcode || isNaN(huisnummer)) continue; // skip rows with missing key fields
-
-        let huisletter = columnMapping.huisletter ? (row[columnMapping.huisletter] || '').trim() || null : null;
-        let toevoeging = columnMapping.huisnummertoevoeging ? (row[columnMapping.huisnummertoevoeging] || '').trim() || null : null;
-
-        // If huisnummer had a non-numeric suffix (e.g. "8A" or "8A1") and no explicit
-        // huisletter/toevoeging columns are mapped, use the remainder as toevoeging.
-        // The SQL matching will try to split it into huisletter + toevoeging.
-        if (huisnummerRemainder && !huisletter && !toevoeging) {
-          toevoeging = huisnummerRemainder;
-        }
-
-        // Normalize toevoeging: remove internal spaces so "A 1" becomes "A1".
-        // This allows the SQL rank-3 split (first char as huisletter, rest as toevoeging)
-        // to match BAG records where huisletter='A' and huisnummertoevoeging='1'.
-        if (toevoeging) {
-          toevoeging = toevoeging.replace(/\s+/g, '');
-        }
+        const parsed = parseAddressComponents(
+          row[columnMapping.postcode!] || '',
+          row[columnMapping.huisnummer!] || '',
+          columnMapping.huisletter ? row[columnMapping.huisletter] || '' : null,
+          columnMapping.huisnummertoevoeging ? row[columnMapping.huisnummertoevoeging] || '' : null,
+        );
+        if (!parsed) continue; // skip rows with missing/invalid key fields
 
         values.push(`($${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3}, $${paramIdx + 4})`);
-        params.push(rowNum, postcode, huisnummer, huisletter, toevoeging);
+        params.push(rowNum, parsed.postcode, parsed.huisnummer, parsed.huisletter, parsed.huisnummertoevoeging);
         paramIdx += 5;
       }
 
@@ -1234,49 +1292,19 @@ async function processEnrichment(
     if (needsWoz) selectColumns.push('woz."wozWaarde" AS "woz_waarde"', 'woz."wozPeildatum" AS "woz_peildatum"');
 
     // Build JOINs dynamically
+    // All fuzzy parsing (combined toevoeging, huisnummer suffix, space normalization)
+    // is handled by parseAddressComponents() BEFORE insertion into csv_input.
+    // The SQL only needs case-insensitive exact matching + LIMIT 1 for dedup.
     const joins: string[] = [];
     if (needsAe || needsEl || needsWoz) {
-      // Flexible matching: when the CSV has a value in huisnummertoevoeging but not huisletter,
-      // also try matching it as huisletter (common in user CSVs where a single column holds both).
-      // All comparisons are case-insensitive (LOWER) because BAG uses mixed case (e.g. "1eV")
-      // while CSV inputs often use uppercase ("1EV").
-      // Uses a ranked subquery to pick the best single BAG match per input row, preventing
-      // duplicate output rows when multiple BAG records share the same postcode+huisnummer.
       joins.push(`LEFT JOIN LATERAL (
-        SELECT ae_inner.*,
-          CASE
-            WHEN LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
-             AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, ''))
-            THEN 1
-            WHEN ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
-             AND LOWER(ae_inner.huisletter) = LOWER(ci.huisnummertoevoeging)
-             AND COALESCE(ae_inner.huisnummertoevoeging, '') = ''
-            THEN 2
-            WHEN ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
-             AND LENGTH(ci.huisnummertoevoeging) > 1
-             AND LOWER(ae_inner.huisletter) = LOWER(LEFT(ci.huisnummertoevoeging, 1))
-             AND LOWER(ae_inner.huisnummertoevoeging) = LOWER(TRIM(SUBSTRING(ci.huisnummertoevoeging FROM 2)))
-            THEN 3
-          END AS match_rank
+        SELECT ae_inner.*
         FROM address_export ae_inner
-        WHERE ae_inner.postcode = ci.postcode AND ae_inner.huisnummer = ci.huisnummer
-          AND (
-            -- Exact match on both fields (case-insensitive)
-            (LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
-             AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, '')))
-            OR
-            -- CSV has toevoeging but no huisletter: try matching toevoeging as huisletter
-            (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
-             AND LOWER(ae_inner.huisletter) = LOWER(ci.huisnummertoevoeging)
-             AND COALESCE(ae_inner.huisnummertoevoeging, '') = '')
-            OR
-            -- CSV has toevoeging but no huisletter: try matching as combined (split first char as letter)
-            (ci.huisletter IS NULL AND ci.huisnummertoevoeging IS NOT NULL
-             AND LENGTH(ci.huisnummertoevoeging) > 1
-             AND LOWER(ae_inner.huisletter) = LOWER(LEFT(ci.huisnummertoevoeging, 1))
-             AND LOWER(ae_inner.huisnummertoevoeging) = LOWER(TRIM(SUBSTRING(ci.huisnummertoevoeging FROM 2))))
-          )
-        ORDER BY match_rank, (ae_inner.object_id IS NOT NULL) DESC
+        WHERE ae_inner.postcode = ci.postcode
+          AND ae_inner.huisnummer = ci.huisnummer
+          AND LOWER(COALESCE(ae_inner.huisletter, '')) = LOWER(COALESCE(ci.huisletter, ''))
+          AND LOWER(COALESCE(ae_inner.huisnummertoevoeging, '')) = LOWER(COALESCE(ci.huisnummertoevoeging, ''))
+        ORDER BY (ae_inner.object_id IS NOT NULL) DESC
         LIMIT 1
       ) ae ON true`);
     }
