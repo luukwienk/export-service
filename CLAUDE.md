@@ -40,10 +40,10 @@ No test framework is configured. There are no tests.
 
 - **Validation**: Zod schemas for request validation
 - **Auth**: Bearer token via `Authorization` header. Health and status endpoints are public.
-- **CSV output**: UTF-8 with BOM (`0xEF 0xBB 0xBF`) for Excel compatibility
+- **CSV output**: UTF-8 with BOM (`0xEF 0xBB 0xBF`), all fields quoted, for Dutch Excel compatibility
 - **File storage**: Vercel Blob via `@vercel/blob` `put()`
 - **Dutch domain**: Column names, some error messages, and domain concepts are Dutch (postcode, huisnummer, woonplaats, etc.)
-- **CORS**: Locked to specific frontend domains (Vercel, ContactBuddy, localhost)
+- **CORS**: Production domains (Vercel, ContactBuddy) + any `localhost:<port>` for development
 
 ## Database
 
@@ -96,6 +96,24 @@ docker-compose ps
 
 **Note**: `docker-compose up -d` alone may fail with `KeyError: 'ContainerConfig'` — this is a known bug in docker-compose v1.29.2 with newer Docker engines. Always stop+rm first.
 
+## Enrichment address parsing
+
+The `parseAddressComponents()` function normalizes CSV address fields into canonical BAG components **before** database insertion. All fuzzy matching logic lives in TypeScript, not SQL.
+
+**Heuristic** (when no separate `huisletter` column is mapped):
+| CSV input | Parsed as | Example |
+|---|---|---|
+| Single letter | `huisletter` | `"A"` → letter=A, toev=null |
+| Letter + digits | `huisletter` + `toevoeging` | `"B11"` → letter=B, toev=11 |
+| Letter + space + digits | Same (spaces stripped) | `"A 1"` → letter=A, toev=1 |
+| Everything else | `toevoeging` | `"bis"`, `"II"`, `"1eV"` → toev as-is |
+
+**Huisnummer suffix**: If the huisnummer field contains `"8A"` or `"8A1"`, the non-numeric part is extracted and parsed using the same heuristic.
+
+**SQL JOIN**: Simple case-insensitive exact match on postcode + huisnummer + huisletter + huisnummertoevoeging, with `LIMIT 1` for dedup. No LATERAL rank logic.
+
+**Frontend sends directly** to this service (not via Next.js proxy) to bypass Vercel's 4.5MB body size limit.
+
 ## When making changes
 
 - Add new endpoints and processing logic directly to `src/index.ts`
@@ -103,6 +121,7 @@ docker-compose ps
 - Use raw `pg` with cursors for heavy queries, Prisma for simple record operations
 - Keep the README.md updated when adding/changing endpoints or parameters
 - Commits go directly to `main` — no PR workflow enforced
+- **Address parsing**: New CSV formats should be handled by adding cases to `parseAddressComponents()`, not by adding SQL complexity
 
 ## Future improvements
 
