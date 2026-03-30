@@ -1161,8 +1161,10 @@ app.post('/api/addresses/enrich', authenticate, (req: express.Request, res: expr
       }
     });
 
-    // Fire and forget
-    processEnrichment(job.id, records, allHeaders, columnMapping, delimiter, categories).catch(error => {
+    // Fire and forget — always output with semicolons for Dutch Excel compatibility
+    // (Dutch locale uses comma as decimal separator, so Excel expects semicolon-delimited CSV)
+    const outputDelimiter = ';';
+    processEnrichment(job.id, records, allHeaders, columnMapping, outputDelimiter, categories).catch(error => {
       console.error('Error in enrichment processing:', error);
       prisma.exportJob.update({
         where: { id: job.id },
