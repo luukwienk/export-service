@@ -1481,10 +1481,9 @@ async function processEnrichment(
 function escapeCSVField(value: string, delimiter: string = ','): string {
   if (value === '' || value === null || value === undefined) return '';
   const str = String(value);
-  if (str.includes(delimiter) || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
+  // Always quote fields to ensure compatibility with Dutch Excel
+  // (which uses comma as decimal separator and can misparse unquoted CSV).
+  return `"${str.replace(/"/g, '""')}"`;
 }
 
 // Health check endpoint
